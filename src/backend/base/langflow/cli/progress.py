@@ -185,13 +185,13 @@ def create_langflow_progress(*, verbose: bool = False) -> ProgressIndicator:
 
     # Define the initialization steps matching the order in main.py
     steps = [
-        ("Initializing Langflow", "Setting up basic configuration"),
+        ("Initializing Unnest", "Setting up basic configuration"),
         ("Checking Environment", "Loading environment variables and settings"),
         ("Starting Core Services", "Initializing database and core services"),
         ("Connecting Database", "Setting up database connection and migrations"),
         ("Loading Components", "Caching component types and custom components"),
         ("Adding Starter Projects", "Creating or updating starter project templates"),
-        ("Launching Langflow", "Starting server and final setup"),
+        ("Launching Unnest", "Starting server and final setup"),
     ]
 
     for title, description in steps:

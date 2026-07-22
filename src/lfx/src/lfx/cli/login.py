@@ -150,13 +150,13 @@ def login_command(
             err_console.print()
             err_console.print("[bold]How to fix:[/bold]")
             if key_env_name:
-                err_console.print("  1. Open Langflow → Settings → API Keys → Create a new key")
+                err_console.print("  1. Open Unnest → Settings → API Keys → Create a new key")
                 err_console.print(f"  2. [bold]export {key_env_name}=<your-new-key>[/bold]")
             elif env_cfg.name not in ("__inline__", "__env__"):
-                err_console.print("  1. Open Langflow → Settings → API Keys → Create a new key")
+                err_console.print("  1. Open Unnest → Settings → API Keys → Create a new key")
                 err_console.print("  2. Pass [bold]--api-key <key>[/bold] or configure api_key_env in your YAML")
             else:
-                err_console.print("  1. Open Langflow → Settings → API Keys → Create a new key")
+                err_console.print("  1. Open Unnest → Settings → API Keys → Create a new key")
                 err_console.print("  2. Pass [bold]--api-key <key>[/bold]")
             raise typer.Exit(1)
 
