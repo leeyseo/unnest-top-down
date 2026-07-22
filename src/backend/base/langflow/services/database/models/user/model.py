@@ -19,9 +19,7 @@ if TYPE_CHECKING:
 
 
 class UserOptin(BaseModel):
-    github_starred: bool = Field(default=False)
     dialog_dismissed: bool = Field(default=False)
-    discord_clicked: bool = Field(default=False)
     # Add more opt-in actions as needed
 
 
@@ -73,7 +71,7 @@ class UserCreate(SQLModel):
     username: str = Field()
     password: str = Field()
     optins: dict[str, Any] | None = Field(
-        default={"github_starred": False, "dialog_dismissed": False, "discord_clicked": False}
+        default={"dialog_dismissed": False}
     )
 
 
@@ -81,7 +79,6 @@ class UserRead(SQLModel):
     id: UUID = Field(default_factory=uuid4)
     username: str = Field()
     profile_image: str | None = Field()
-    store_api_key: str | None = Field(nullable=True)
     is_active: bool = Field()
     is_superuser: bool = Field()
     create_at: datetime = Field()

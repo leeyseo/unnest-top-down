@@ -368,11 +368,6 @@ def run(
         help="Run only the backend server without the frontend.",
         show_default=False,
     ),
-    store: bool | None = typer.Option(  # noqa: ARG001
-        None,
-        help="Enables the store features.",
-        show_default=False,
-    ),
     auto_saving: bool | None = typer.Option(  # noqa: ARG001
         None,
         help="Defines if the auto save is enabled.",

@@ -1,10 +1,10 @@
 import { memo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import LangflowLogo from "@/assets/LangflowLogo.svg?react";
 import IconComponent, {
   ForwardedIconComponent,
 } from "@/components/common/genericIconComponent";
 import MessageMetadata from "@/components/common/messageMetadataComponent";
+import UnnestLogo from "@/components/common/unnest-logo";
 import { ContentBlockDisplay } from "@/components/core/chatComponents/ContentBlockDisplay";
 import { useUpdateMessage } from "@/controllers/API/queries/messages";
 import { CustomMarkdownField } from "@/customization/components/custom-markdown-field";
@@ -148,7 +148,10 @@ export const BotMessage = memo(
                   }
                 >
                   <div className="flex h-5 w-5 items-center justify-center">
-                    <LangflowLogo className="h-4 w-4 text-black" />
+                    <UnnestLogo
+                      className="h-4 w-4"
+                      markClassName="dark:invert-0"
+                    />
                   </div>
                 </div>
               )}

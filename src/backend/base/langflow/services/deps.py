@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from langflow.services.database.service import DatabaseService
     from langflow.services.session.service import SessionService
     from langflow.services.state.service import StateService
-    from langflow.services.store.service import StoreService
     from langflow.services.task.service import TaskService
     from langflow.services.tracing.service import TracingService
     from langflow.services.variable.service import VariableService
@@ -230,15 +229,6 @@ def get_chat_service() -> ChatService:
         ChatService: The chat service instance.
     """
     return get_service(ServiceType.CHAT_SERVICE)
-
-
-def get_store_service() -> StoreService:
-    """Retrieves the StoreService instance from the service manager.
-
-    Returns:
-        StoreService: The StoreService instance.
-    """
-    return get_service(ServiceType.STORE_SERVICE)
 
 
 def get_queue_service() -> JobQueueService:

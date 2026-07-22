@@ -1,5 +1,4 @@
 import { useTranslation } from "react-i18next";
-import { convertTestName } from "@/components/common/storeCardComponent/utils/convert-test-name";
 import { Badge } from "@/components/ui/badge";
 import { nodeColorsName } from "@/utils/styleUtils";
 
@@ -56,7 +55,7 @@ export default function HandleTooltipComponent({
                   ? `hsl(var(--datatype-${nodeColorsName[word]}-foreground))`
                   : `hsl(var(--datatype-${nodeColorsName[word]}))`,
               }}
-              data-testid={`${isInput ? "input" : "output"}-tooltip-${convertTestName(word)}`}
+              data-testid={`${isInput ? "input" : "output"}-tooltip-${word.replaceAll(" ", "-").toLowerCase()}`}
             >
               {word}
             </Badge>

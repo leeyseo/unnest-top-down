@@ -4,9 +4,8 @@ import { ArrowRight, X } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
-import langflowAssistantIcon from "@/assets/langflow_assistant.svg";
-import langflowAssistantIdleIcon from "@/assets/langflow_assistant_idle.svg";
 import ForwardedIconComponent from "@/components/common/genericIconComponent";
+import UnnestLogo from "@/components/common/unnest-logo";
 import {
   readAssistantDiscovered,
   writeAssistantDiscovered,
@@ -21,7 +20,7 @@ import type { AllNodeType } from "@/types/flow";
 import CanvasControlsDropdown from "./CanvasControlsDropdown";
 import HelpDropdown from "./HelpDropdown";
 
-// Delay before the "Try the new Langflow Assistant!" tooltip surfaces, in ms.
+// Delay before the "Try the new Unnest Assistant!" tooltip surfaces, in ms.
 // Long enough that an active user mid-task isn't interrupted; short enough
 // that a user who landed on the canvas and paused gets the hint.
 const ONBOARDING_TOOLTIP_DELAY_MS = 10_000;
@@ -180,28 +179,9 @@ const CanvasControls = ({
                 className="group/btn relative flex h-8 w-8 items-center justify-center overflow-hidden rounded-md hover:bg-muted"
                 onClick={handleAssistantClick}
               >
-                {/* Idle state — uses the design-tuned
-                    ``langflow_assistant_idle.svg`` (noise filter + brand tint
-                    baked into the SVG). Hidden whenever the panel is open so
-                    the button reads as "active" alongside the open panel. */}
-                <img
-                  src={langflowAssistantIdleIcon}
-                  alt="Langflow Assistant"
-                  className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-150 ${
-                    assistantSidebarOpen ? "opacity-0" : "group-hover:opacity-0"
-                  }`}
-                />
-                {/* Brand-lit icon — surfaces on hover AND while the panel is
-                    open; both states share the same active brand identity. */}
-                <img
-                  src={langflowAssistantIcon}
-                  alt=""
-                  aria-hidden="true"
-                  className={`absolute inset-0 h-full w-full object-cover transition-opacity duration-150 ${
-                    assistantSidebarOpen
-                      ? "opacity-100"
-                      : "opacity-0 group-hover:opacity-100"
-                  }`}
+                <UnnestLogo
+                  aria-label="Unnest Assistant"
+                  className="h-5 w-5 transition-transform duration-150 group-hover/btn:scale-105"
                 />
               </Button>
             </div>
@@ -239,7 +219,7 @@ const CanvasControls = ({
               <button
                 type="button"
                 data-testid="assistant-onboarding-open"
-                aria-label="Open Langflow Assistant"
+                aria-label="Open Unnest Assistant"
                 className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-foreground transition-colors hover:bg-muted-foreground/10"
                 onClick={handleAssistantClick}
               >

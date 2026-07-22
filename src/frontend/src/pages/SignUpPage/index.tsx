@@ -1,8 +1,8 @@
 import * as Form from "@radix-ui/react-form";
 import { type FormEvent, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import LangflowLogo from "@/assets/LangflowLogo.svg?react";
 import ShadTooltip from "@/components/common/shadTooltipComponent";
+import UnnestLogo from "@/components/common/unnest-logo";
 import InputComponent from "@/components/core/parameterRenderComponent/components/inputComponent";
 import { useAddUser } from "@/controllers/API/queries/auth";
 import { CustomLink } from "@/customization/components/custom-link";
@@ -89,10 +89,7 @@ export default function SignUp(): JSX.Element {
     >
       <div className="flex h-full w-full flex-col items-center justify-center bg-muted">
         <div className="flex w-full max-w-xs flex-col items-center justify-center gap-2">
-          <LangflowLogo
-            title={t("common.langflowLogo")}
-            className="mb-4 h-10 w-10 scale-[1.5]"
-          />
+          <UnnestLogo showWordmark className="mb-4 h-14" />
           <span className="mb-6 text-2xl font-semibold text-primary text-center">
             {t("auth.signupTitle")}
           </span>

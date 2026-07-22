@@ -4,7 +4,7 @@ import { SidebarDraggableComponent } from "../sidebarDraggableComponent";
 
 // Mock all external dependencies
 jest.mock(
-  "@/components/common/storeCardComponent/utils/convert-test-name",
+  "@/utils/convert-test-name",
   () => ({
     convertTestName: (name: string) => name.toLowerCase().replace(/\s+/g, "-"),
   }),

@@ -226,7 +226,7 @@ body:has([data-radix-popper-content-wrapper]) .react-flow__pane {
 }
 
 code {
-  font-family: var(--font-mono) s !important;
+  font-family: var(--font-mono) !important;
 }
 
 .ag-cell {

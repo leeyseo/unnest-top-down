@@ -78,7 +78,9 @@ export const MemoizedSidebarTrigger = memo(() => {
     >
       <SidebarTrigger className="h-fit w-fit px-3 py-1.5">
         <ForwardedIconComponent name="PanelRightClose" className="h-4 w-4" />
-        <span className="text-foreground">{t("store.storeComponents")}</span>
+        <span className="text-foreground">
+          {t("mainPage.flowType.components")}
+        </span>
       </SidebarTrigger>
     </Panel>
   );

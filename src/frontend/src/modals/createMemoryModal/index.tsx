@@ -199,23 +199,7 @@ export default function CreateMemoryModal({
                     <span className="text-destructive">*</span>
                   </Label>
                   <ShadTooltip
-                    content={
-                      <span>
-                        {t("memory.preprocessingInstructionsHint")}{" "}
-                        <a
-                          href="https://docs.langflow.org/memory-bases#preprocessing-prompt-examples"
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-0.5 text-tooltip-foreground underline opacity-80 hover:opacity-100"
-                        >
-                          {t("memory.seePromptExamples")}
-                          <ForwardedIconComponent
-                            name="ExternalLink"
-                            className="h-3 w-3"
-                          />
-                        </a>
-                      </span>
-                    }
+                    content={t("memory.preprocessingInstructionsHint")}
                     side="right"
                   >
                     <button

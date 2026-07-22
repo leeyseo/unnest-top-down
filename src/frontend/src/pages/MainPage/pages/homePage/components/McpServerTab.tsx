@@ -38,7 +38,6 @@ const McpServerTab = ({ folderName }: { folderName: string }) => {
   const {
     flowsMCPData,
     currentAuthSettings,
-    isOAuthProject,
     composerUrlData,
     installedClients,
     installedMCPData,
@@ -74,15 +73,10 @@ const McpServerTab = ({ folderName }: { folderName: string }) => {
           </div>
           <div className="pb-4 text-mmd text-muted-foreground">
             {t("mcp.serverDescription")}
-            <a
-              className="text-accent-pink-foreground"
-              href="https://docs.langflow.org/mcp-server"
-              target="_blank"
-              rel="noreferrer"
-            >
+            <span className="font-medium text-foreground">
               {" "}
               {t("mcp.serverGuideLink")}
-            </a>
+            </span>
           </div>
         </div>
       </div>

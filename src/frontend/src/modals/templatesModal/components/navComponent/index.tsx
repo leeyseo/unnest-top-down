@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import ForwardedIconComponent from "@/components/common/genericIconComponent";
-import { convertTestName } from "@/components/common/storeCardComponent/utils/convert-test-name";
+import { convertTestName } from "@/utils/convert-test-name";
 import {
   Sidebar,
   SidebarContent,

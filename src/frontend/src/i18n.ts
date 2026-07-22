@@ -4,6 +4,7 @@ import en from "./locales/en.json";
 
 const SUPPORTED_LANGUAGES = [
   "en",
+  "ko",
   "de",
   "es",
   "fr",
@@ -13,7 +14,7 @@ const SUPPORTED_LANGUAGES = [
 ] as const;
 
 const normalizeLanguage = (lang?: string | null): string => {
-  if (!lang) return "en";
+  if (!lang) return "ko";
 
   if (
     SUPPORTED_LANGUAGES.includes(lang as (typeof SUPPORTED_LANGUAGES)[number])
@@ -41,7 +42,7 @@ const normalizeLanguage = (lang?: string | null): string => {
 };
 
 export const detectedLang = normalizeLanguage(
-  localStorage.getItem("languagePreference") || "en",
+  localStorage.getItem("languagePreference") || "ko",
 );
 
 const i18n = i18next.createInstance();
@@ -63,6 +64,15 @@ i18n.use(initReactI18next).init({
   },
 });
 console.info = _consoleInfo;
+
+const syncDocumentLanguage = (lang: string) => {
+  if (typeof document !== "undefined") {
+    document.documentElement.lang = lang;
+  }
+};
+
+syncDocumentLanguage(detectedLang);
+i18n.on("languageChanged", syncDocumentLanguage);
 
 export async function loadLanguage(lang: string): Promise<void> {
   if (lang === "en") return;

@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useContext, useState } from "react";
 import { useTranslation } from "react-i18next";
-import LangflowLogo from "@/assets/LangflowLogo.svg?react";
+import UnnestLogo from "@/components/common/unnest-logo";
 import { useLoginUser } from "@/controllers/API/queries/auth";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
@@ -53,10 +53,7 @@ export default function LoginAdminPage() {
   return (
     <div className="flex h-full w-full flex-col items-center justify-center bg-muted">
       <div className="flex w-72 flex-col items-center justify-center gap-2">
-        <LangflowLogo
-          title={t("common.langflowLogo")}
-          className="h-10 w-10 scale-[1.5]"
-        />
+        <UnnestLogo showWordmark className="mb-4 h-14" />
         <span className="mb-6 text-2xl font-semibold text-primary">
           {t("auth.adminTitle")}
         </span>

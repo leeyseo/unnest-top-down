@@ -289,17 +289,9 @@ describe("CookieManager", () => {
     it("should clear all auth-related cookies", () => {
       cookieManager.clearAuthCookies();
 
-      expect(mockCookiesInstance.remove).toHaveBeenCalledTimes(4);
+      expect(mockCookiesInstance.remove).toHaveBeenCalledTimes(3);
       expect(mockCookiesInstance.remove).toHaveBeenCalledWith(
         "access_token_lf",
-        {
-          path: "/",
-          secure: false,
-          sameSite: "lax",
-        },
-      );
-      expect(mockCookiesInstance.remove).toHaveBeenCalledWith(
-        "apikey_tkn_lflw",
         {
           path: "/",
           secure: false,

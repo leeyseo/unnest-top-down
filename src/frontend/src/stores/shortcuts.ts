@@ -20,8 +20,6 @@ export const useShortcutsStore = create<shortcutsStoreType>((set, get) => ({
   code: "space",
   copy: "mod+c",
   duplicate: "mod+d",
-  componentShare: "mod+shift+s",
-  docs: "mod+shift+d",
   changesSave: "mod+s",
   saveComponent: "mod+alt+s",
   delete: "backspace",

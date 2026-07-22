@@ -94,7 +94,7 @@ async def test_session_endpoint_unauthenticated(client):
     data = response.json()
     assert data["authenticated"] is False
     assert data["user"] is None
-    assert data["store_api_key"] is None
+    assert "store_api_key" not in data
 
 
 async def test_session_endpoint_invalid_token_returns_unauthenticated(client):
@@ -109,7 +109,7 @@ async def test_session_endpoint_invalid_token_returns_unauthenticated(client):
     data = response.json()
     assert data["authenticated"] is False
     assert data["user"] is None
-    assert data["store_api_key"] is None
+    assert "store_api_key" not in data
 
 
 async def test_session_endpoint_authenticated(client, logged_in_headers):
@@ -123,15 +123,10 @@ async def test_session_endpoint_authenticated(client, logged_in_headers):
     assert data["user"]["is_active"] is True
 
 
-async def test_session_endpoint_no_api_key_in_response(client, logged_in_headers):
-    """Test /session endpoint does not return store_api_key in response body.
-
-    This is a security check to ensure API keys are not exposed in HTTP response bodies,
-    even to authenticated users. API keys should only be stored in httponly cookies.
-    """
+async def test_session_endpoint_no_legacy_store_key_in_response(client, logged_in_headers):
+    """The retired Store credential must not appear in session responses."""
     response = await client.get("api/v1/session", headers=logged_in_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["authenticated"] is True
-    # Verify store_api_key field is None or not present in response
-    assert data.get("store_api_key") is None
+    assert "store_api_key" not in data

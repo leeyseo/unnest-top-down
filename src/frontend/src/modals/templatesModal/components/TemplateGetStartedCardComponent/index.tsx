@@ -1,6 +1,6 @@
 import { useParams } from "react-router-dom";
 import ForwardedIconComponent from "@/components/common/genericIconComponent";
-import { convertTestName } from "@/components/common/storeCardComponent/utils/convert-test-name";
+import { convertTestName } from "@/utils/convert-test-name";
 import { useCustomNavigate } from "@/customization/hooks/use-custom-navigate";
 import { track } from "@/customization/utils/analytics";
 import useAddFlow from "@/hooks/flows/use-add-flow";

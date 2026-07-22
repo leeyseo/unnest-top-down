@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import langflowAssistantIcon from "@/assets/langflow_assistant.svg";
 import MessageMetadata from "@/components/common/messageMetadataComponent";
+import UnnestLogo from "@/components/common/unnest-logo";
 import { CustomProfileIcon } from "@/customization/components/custom-profile-icon";
 import { cn } from "@/utils/utils";
 import type { AssistantMessage } from "../assistant-panel.types";
@@ -168,11 +168,7 @@ export function AssistantMessageItem({
           <CustomProfileIcon className="h-7 w-7 shrink-0 rounded-full" />
         ) : (
           <div className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-lg">
-            <img
-              src={langflowAssistantIcon}
-              alt={t("assistant.title")}
-              className="h-full w-full object-cover"
-            />
+            <UnnestLogo aria-label={t("assistant.title")} className="h-5 w-5" />
           </div>
         )}
         <div className="flex min-w-0 flex-1 flex-col">

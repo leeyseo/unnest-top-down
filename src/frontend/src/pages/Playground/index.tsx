@@ -60,7 +60,7 @@ export default function PlaygroundPage() {
   }, []);
 
   useEffect(() => {
-    document.title = currentSavedFlow?.name || "Langflow";
+    document.title = currentSavedFlow?.name || "Unnest";
     if (currentSavedFlow?.data) {
       const { inputs, outputs } = getInputsAndOutputs(
         currentSavedFlow?.data?.nodes || [],

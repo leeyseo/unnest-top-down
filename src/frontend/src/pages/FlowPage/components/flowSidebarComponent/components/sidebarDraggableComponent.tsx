@@ -4,7 +4,7 @@ import IconComponent, {
   ForwardedIconComponent,
 } from "@/components/common/genericIconComponent";
 import ShadTooltip from "@/components/common/shadTooltipComponent";
-import { convertTestName } from "@/components/common/storeCardComponent/utils/convert-test-name";
+import { convertTestName } from "@/utils/convert-test-name";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {

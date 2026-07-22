@@ -60,7 +60,6 @@ class SessionResponse(BaseModel):
 
     authenticated: bool
     user: UserRead | None = None
-    store_api_key: str | None = None
 
 
 @router.post("/login", response_model=Token, include_in_schema=False)
@@ -108,15 +107,6 @@ async def login_to_get_access_token(
             samesite=auth_settings.ACCESS_SAME_SITE,
             secure=auth_settings.ACCESS_SECURE,
             expires=auth_settings.ACCESS_TOKEN_EXPIRE_SECONDS,
-            domain=auth_settings.COOKIE_DOMAIN,
-        )
-        response.set_cookie(
-            "apikey_tkn_lflw",
-            str(user.store_api_key),
-            httponly=auth_settings.ACCESS_HTTPONLY,
-            samesite=auth_settings.ACCESS_SAME_SITE,
-            secure=auth_settings.ACCESS_SECURE,
-            expires=None,  # Set to None to make it a session cookie
             domain=auth_settings.COOKIE_DOMAIN,
         )
         await get_variable_service().initialize_user_variables(user.id, db)
@@ -169,24 +159,10 @@ async def auto_login(response: Response, db: DbSession):
 
         user = await get_user_by_id(db, user_id)
 
-        if user:
-            if user.store_api_key is None:
-                user.store_api_key = ""
+        if user and get_settings_service().settings.agentic_experience:
+            from langflow.api.utils.mcp.agentic_mcp import initialize_agentic_user_variables
 
-            response.set_cookie(
-                "apikey_tkn_lflw",
-                str(user.store_api_key),  # Ensure it's a string
-                httponly=auth_settings.ACCESS_HTTPONLY,
-                samesite=auth_settings.ACCESS_SAME_SITE,
-                secure=auth_settings.ACCESS_SECURE,
-                expires=None,  # Set to None to make it a session cookie
-                domain=auth_settings.COOKIE_DOMAIN,
-            )
-
-            if get_settings_service().settings.agentic_experience:
-                from langflow.api.utils.mcp.agentic_mcp import initialize_agentic_user_variables
-
-                await initialize_agentic_user_variables(user.id, db)
+            await initialize_agentic_user_variables(user.id, db)
 
         return tokens
 
@@ -284,13 +260,6 @@ async def logout(response: Response):
     )
     response.delete_cookie(
         "access_token_lf",
-        httponly=auth_settings.ACCESS_HTTPONLY,
-        samesite=auth_settings.ACCESS_SAME_SITE,
-        secure=auth_settings.ACCESS_SECURE,
-        domain=auth_settings.COOKIE_DOMAIN,
-    )
-    response.delete_cookie(
-        "apikey_tkn_lflw",
         httponly=auth_settings.ACCESS_HTTPONLY,
         samesite=auth_settings.ACCESS_SAME_SITE,
         secure=auth_settings.ACCESS_SECURE,

@@ -95,15 +95,6 @@ export function MemoryDetailsHeader({
             </TooltipTrigger>
             <TooltipContent className="max-w-xs">
               <p>{t("memory.autoCaptureTooltip")}</p>
-              <a
-                href="https://docs.langflow.org/memory-bases"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-1 flex items-center gap-1 text-xs text-primary underline"
-              >
-                {t("memory.readTheDocs")}
-                <IconComponent name="ExternalLink" className="h-3 w-3" />
-              </a>
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>

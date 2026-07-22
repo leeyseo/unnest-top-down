@@ -1,7 +1,7 @@
 import type { FC } from "react";
 import { useTranslation } from "react-i18next";
-import MCPLangflow from "@/assets/MCPLangflow.png";
 import ForwardedIconComponent from "@/components/common/genericIconComponent";
+import UnnestLogo from "@/components/common/unnest-logo";
 import { Button } from "@/components/ui/button";
 import { useCustomNavigate } from "@/customization/hooks/use-custom-navigate";
 
@@ -26,11 +26,16 @@ export const MCPServerNotice: FC<{
           </div>
           <div className="">{t("sidebar.mcpProjectsTitle")}</div>
         </div>
-        <img
-          src={MCPLangflow}
-          alt={t("sidebar.mcpNoticeImageAlt")}
-          className="rounded-xl"
-        />
+        <div className="flex h-28 items-center justify-center gap-5 rounded-xl bg-black px-5 text-white">
+          <UnnestLogo
+            showWordmark
+            className="h-12"
+            markClassName="invert"
+            wordmarkClassName="text-xl text-white"
+          />
+          <span className="text-xl text-accent-blue-foreground">+</span>
+          <ForwardedIconComponent name="Mcp" className="h-10 w-10" />
+        </div>
         <p className="text-sm text-secondary-foreground">
           {t("sidebar.mcpExposeFlows")}
         </p>

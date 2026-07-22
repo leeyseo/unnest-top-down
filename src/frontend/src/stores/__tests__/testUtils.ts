@@ -50,7 +50,6 @@ export const mockConstants = {
     { name: "Fable", value: "fable" },
   ],
   USER_PROJECTS_HEADER: "My Collection",
-  STORE_USER_PROJECTS: "store_user_projects",
 };
 
 /**

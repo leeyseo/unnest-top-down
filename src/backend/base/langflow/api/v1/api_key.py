@@ -1,15 +1,13 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException
 
 from langflow.api.utils import CurrentActiveUser, DbSession
-from langflow.api.v1.schemas import ApiKeyCreateRequest, ApiKeysResponse
-from langflow.services.auth import utils as auth_utils
+from langflow.api.v1.schemas import ApiKeysResponse
 
 # Assuming you have these methods in your service layer
 from langflow.services.database.models.api_key.crud import create_api_key, delete_api_key, get_api_keys
 from langflow.services.database.models.api_key.model import ApiKeyCreate, UnmaskedApiKeyRead
-from langflow.services.deps import get_settings_service
 
 router = APIRouter(tags=["APIKey"], prefix="/api_key")
 
@@ -51,38 +49,3 @@ async def delete_api_key_route(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return {"detail": "API Key deleted"}
-
-
-@router.post("/store", include_in_schema=False)
-async def save_store_api_key(
-    api_key_request: ApiKeyCreateRequest,
-    response: Response,
-    current_user: CurrentActiveUser,
-    db: DbSession,
-):
-    settings_service = get_settings_service()
-    auth_settings = settings_service.auth_settings
-
-    try:
-        api_key = api_key_request.api_key
-
-        # Encrypt the API key
-        encrypted = auth_utils.encrypt_api_key(api_key)
-        current_user.store_api_key = encrypted
-        db.add(current_user)
-        await db.commit()
-
-        response.set_cookie(
-            "apikey_tkn_lflw",
-            encrypted,
-            httponly=auth_settings.ACCESS_HTTPONLY,
-            samesite=auth_settings.ACCESS_SAME_SITE,
-            secure=auth_settings.ACCESS_SECURE,
-            expires=None,  # Set to None to make it a session cookie
-            domain=auth_settings.COOKIE_DOMAIN,
-        )
-
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-    return {"detail": "API Key saved"}

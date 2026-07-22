@@ -68,14 +68,9 @@ export function SaveChangesModal({
               })}
             </div>
             {t("flow.unsavedChangesLost")}{" "}
-            <a
-              target="_blank"
-              className="text-accent-pink-foreground hover:underline"
-              href="https://docs.langflow.org/environment-variables#visual-editor-and-playground-behavior"
-              rel="noopener"
-            >
+            <span className="font-medium text-foreground">
               {t("flow.enableAutoSaving")}
-            </a>{" "}
+            </span>{" "}
             {t("flow.toAvoidLosingProgress")}
           </>
         )}

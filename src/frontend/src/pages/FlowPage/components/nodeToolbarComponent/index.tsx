@@ -10,7 +10,6 @@ import ToggleShadComponent from "@/components/core/parameterRenderComponent/comp
 import { Button } from "@/components/ui/button";
 import { usePostTemplateValue } from "@/controllers/API/queries/nodes/use-post-template-value";
 import { usePostRetrieveVertexOrder } from "@/controllers/API/queries/vertex";
-import { customOpenNewTab } from "@/customization/utils/custom-open-new-tab";
 import useAddFlow from "@/hooks/flows/use-add-flow";
 import type { APIClassType } from "@/types/api";
 import IconComponent from "../../../../components/common/genericIconComponent";
@@ -25,7 +24,6 @@ import { useDarkStore } from "../../../../stores/darkStore";
 import useFlowStore from "../../../../stores/flowStore";
 import useFlowsManagerStore from "../../../../stores/flowsManagerStore";
 import { useShortcutsStore } from "../../../../stores/shortcuts";
-import { useStoreStore } from "../../../../stores/storeStore";
 import { useUtilityStore } from "../../../../stores/utilityStore";
 import type { nodeToolbarPropsType } from "../../../../types/components";
 import type { FlowType } from "../../../../types/flow";
@@ -64,7 +62,6 @@ const NodeToolbarComponent = memo(
     const { t } = useTranslation();
     const version = useDarkStore((state) => state.version);
     const [showModalAdvanced, setShowModalAdvanced] = useState(false);
-    const [showconfirmShare, setShowconfirmShare] = useState(false);
     const [showOverrideModal, setShowOverrideModal] = useState(false);
     const [flowComponent, setFlowComponent] = useState<FlowType>(
       createFlowComponent(cloneDeep(data), version),
@@ -72,11 +69,6 @@ const NodeToolbarComponent = memo(
     const updateFreezeStatus = useFlowStore(
       (state) => state.updateFreezeStatus,
     );
-    const { hasStore, hasApiKey, validApiKey } = useStoreStore((state) => ({
-      hasStore: state.hasStore,
-      hasApiKey: state.hasApiKey,
-      validApiKey: state.validApiKey,
-    }));
     const shortcuts = useShortcutsStore((state) => state.shortcuts);
     const currentFlowId = useFlowsManagerStore((state) => state.currentFlowId);
     const [openModal, setOpenModal] = useState(false);
@@ -233,12 +225,6 @@ const NodeToolbarComponent = memo(
       expandGroupNode,
     ]);
 
-    const shareComponent = useCallback(() => {
-      if (hasApiKey || hasStore) {
-        setShowconfirmShare((state) => !state);
-      }
-    }, [hasApiKey, hasStore]);
-
     const handleCodeModal = useCallback(() => {
       if (!hasCode) {
         setNoticeData({ title: t("node.cannotAccessCode", { id: data.id }) });
@@ -262,13 +248,6 @@ const NodeToolbarComponent = memo(
       });
       setSuccessData({ title: t("success.componentSaved", { id: data.id }) });
     }, [isSaved, data.id, flowComponent, addFlow]);
-
-    const openDocs = useCallback(() => {
-      if (data.node?.documentation) {
-        return customOpenNewTab(data.node.documentation);
-      }
-      setNoticeData({ title: t("node.docsUnavailable", { id: data.id }) });
-    }, [data.id, data.node?.documentation]);
 
     const handleDownloadNode = useCallback(async () => {
       try {
@@ -296,16 +275,13 @@ const NodeToolbarComponent = memo(
       showOverrideModal,
       showModalAdvanced,
       openModal,
-      showconfirmShare,
       FreezeAllVertices: () => {
         FreezeAllVertices({ flowId: currentFlowId, stopNodeId: data.id });
       },
       downloadFunction: () => downloadNode(flowComponent!),
-      displayDocs: openDocs,
       saveComponent,
       showAdvance: () => setShowModalAdvanced((state) => !state),
       handleCodeModal,
-      shareComponent,
       ungroup: handleungroup,
       minimizeFunction: handleMinimize,
       activateToolMode: handleActivateToolMode,
@@ -344,7 +320,6 @@ const NodeToolbarComponent = memo(
       data.node?.description,
       data.node?.template,
       showModalAdvanced,
-      showconfirmShare,
     ]);
 
     const [selectedValue, setSelectedValue] = useState(null);
@@ -379,9 +354,6 @@ const NodeToolbarComponent = memo(
             takeSnapshot();
             handleMinimize();
             break;
-          case "Share":
-            shareComponent();
-            break;
           case "Download":
             handleDownloadNode();
             break;
@@ -390,9 +362,6 @@ const NodeToolbarComponent = memo(
               flow: flowComponent,
               override: false,
             });
-            break;
-          case "documentation":
-            openDocs();
             break;
           case "disabled":
             break;
@@ -442,10 +411,8 @@ const NodeToolbarComponent = memo(
         setOpenModal,
         setShowModalAdvanced,
         handleMinimize,
-        shareComponent,
         downloadNode,
         addFlow,
-        openDocs,
         handleungroup,
         setShowOverrideModal,
         deleteNode,
@@ -705,37 +672,6 @@ const NodeToolbarComponent = memo(
                     />
                   </SelectItem>
                 )}
-                {hasStore && (
-                  <SelectItem
-                    value={"Share"}
-                    disabled={!hasApiKey || !validApiKey}
-                  >
-                    <ToolbarSelectItem
-                      shortcut={
-                        shortcuts.find((obj) => obj.name === "Component Share")
-                          ?.shortcut!
-                      }
-                      value={t("nodeToolbar.share")}
-                      icon={"Share3"}
-                      dataTestId="share-button-modal"
-                    />
-                  </SelectItem>
-                )}
-
-                <SelectItem
-                  value={"documentation"}
-                  disabled={data.node?.documentation === ""}
-                >
-                  <ToolbarSelectItem
-                    shortcut={
-                      shortcuts.find((obj) => obj.name === "Docs")?.shortcut!
-                    }
-                    value={t("nodeToolbar.docs")}
-                    icon={"FileText"}
-                    dataTestId="docs-button-modal"
-                  />
-                </SelectItem>
-
                 {(isMinimal || !showNode) && (
                   <SelectItem
                     value={"show"}
@@ -824,12 +760,10 @@ const NodeToolbarComponent = memo(
 
           <ToolbarModals
             showModalAdvanced={showModalAdvanced}
-            showconfirmShare={showconfirmShare}
             showOverrideModal={showOverrideModal}
             openModal={openModal}
             hasCode={hasCode}
             setShowModalAdvanced={setShowModalAdvanced}
-            setShowconfirmShare={setShowconfirmShare}
             setShowOverrideModal={setShowOverrideModal}
             setOpenModal={setOpenModal}
             data={data}

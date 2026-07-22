@@ -580,7 +580,6 @@ def register_all_service_factories() -> None:
     from langflow.services.shared_component_cache import factory as shared_component_cache_factory
     from langflow.services.state import factory as state_factory
     from langflow.services.storage import factory as storage_factory
-    from langflow.services.store import factory as store_factory
     from langflow.services.task import factory as task_factory
     from langflow.services.telemetry import factory as telemetry_factory
     from langflow.services.telemetry_writer import factory as telemetry_writer_factory
@@ -603,7 +602,6 @@ def register_all_service_factories() -> None:
     service_manager.register_factory(state_factory.StateServiceFactory())
     service_manager.register_factory(job_queue_factory.JobQueueServiceFactory())
     service_manager.register_factory(task_factory.TaskServiceFactory())
-    service_manager.register_factory(store_factory.StoreServiceFactory())
     service_manager.register_factory(shared_component_cache_factory.SharedComponentCacheServiceFactory())
     # Override LFX's no-op auth service with Langflow's full JWT implementation
     service_manager.register_service_class(ServiceType.AUTH_SERVICE, AuthService, override=True)

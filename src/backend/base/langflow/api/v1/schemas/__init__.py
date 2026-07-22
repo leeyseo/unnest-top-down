@@ -252,10 +252,6 @@ class Token(BaseModel):
     token_type: str
 
 
-class ApiKeyCreateRequest(BaseModel):
-    api_key: str
-
-
 class VerticesOrderResponse(BaseModel):
     ids: list[str]
     run_id: UUID

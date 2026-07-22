@@ -6,15 +6,12 @@ import {
   SelectItem,
 } from "@/components/ui/select-custom";
 import ToolbarSelectItem from "@/pages/FlowPage/components/nodeToolbarComponent/toolbarSelectItem";
-import type { NoteDataType } from "@/types/flow";
 
 export const SelectItems = memo(
   ({
     shortcuts,
-    data,
   }: {
     shortcuts: Array<{ name: string; display_name: string; shortcut: string }>;
-    data: NoteDataType;
   }) => {
     const { t } = useTranslation();
     return (
@@ -35,17 +32,6 @@ export const SelectItems = memo(
             value={t("nodeToolbar.copy")}
             icon="Clipboard"
             dataTestId="copy-button-modal"
-          />
-        </SelectItem>
-        <SelectItem
-          value="documentation"
-          disabled={data.node?.documentation === ""}
-        >
-          <ToolbarSelectItem
-            shortcut={shortcuts.find((obj) => obj.name === "Docs")?.shortcut!}
-            value={t("nodeToolbar.docs")}
-            icon="FileText"
-            dataTestId="docs-button-modal"
           />
         </SelectItem>
         <SelectItem value="delete" className="focus:bg-destructive/[.20]">

@@ -33,7 +33,6 @@ task_service = "langflow.services.task.service:TaskService"
 job_queue_service = "langflow.services.job_queue.service:JobQueueService"
 
 # Marketplace & Components
-store_service = "langflow.services.store.service:StoreService"
 shared_component_cache_service = "langflow.services.shared_component_cache.service:SharedComponentCacheService"
 
 # Observability

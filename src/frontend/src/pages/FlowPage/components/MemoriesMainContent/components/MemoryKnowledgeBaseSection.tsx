@@ -56,15 +56,6 @@ export function MemoryKnowledgeBaseSection({
               </TooltipTrigger>
               <TooltipContent className="max-w-xs">
                 <p>{t("memory.memoryBaseTooltip")}</p>
-                <a
-                  href="https://docs.langflow.org/memory-bases"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="mt-1 flex items-center gap-1 text-xs text-primary underline"
-                >
-                  {t("memory.readTheDocs")}
-                  <IconComponent name="ExternalLink" className="h-3 w-3" />
-                </a>
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
@@ -100,15 +91,6 @@ export function MemoryKnowledgeBaseSection({
             <p className="max-w-xs text-xs text-muted-foreground">
               {t("memory.noChunksRunFlow")}
             </p>
-            <a
-              href="https://docs.langflow.org/memory-bases"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 text-xs text-primary underline"
-            >
-              {t("memory.noChunksLearnMore")}
-              <IconComponent name="ExternalLink" className="h-3 w-3" />
-            </a>
           </div>
         ) : (
           <Table>

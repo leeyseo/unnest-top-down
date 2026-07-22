@@ -4,7 +4,7 @@ from lfx.serialization.constants import MAX_ITEMS_LENGTH, MAX_TEXT_LENGTH
 
 
 class UiSettings(BaseModel):
-    """Frontend, auto-save, display limits, and (legacy) Langflow Store integration."""
+    """Frontend, auto-save, and display-limit settings."""
 
     auto_saving: bool = True
     """If set to True, Langflow will auto save flows."""
@@ -46,9 +46,3 @@ class UiSettings(BaseModel):
     """If set to True, hides the ability to create new flows."""
     hide_starter_projects: bool = False
     """If set to True, hides starter projects from the UI (does not affect database seeding)."""
-
-    # Langflow Store (legacy)
-    store: bool | None = True
-    store_url: str | None = "https://api.langflow.store"
-    download_webhook_url: str | None = "https://api.langflow.store/flows/trigger/ec611a61-8460-4438-b187-a4f65e5559d4"
-    like_webhook_url: str | None = "https://api.langflow.store/flows/trigger/64275852-ec00-45c1-984e-3bff814732da"

@@ -4,7 +4,7 @@ import json as _json
 import re
 from datetime import timedelta
 from enum import Enum
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 from urllib.parse import quote
 
 from fastapi import Depends, HTTPException, Path, Query
@@ -17,12 +17,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from langflow.services.auth.utils import get_current_active_user, get_current_active_user_mcp
 from langflow.services.database.models.flow.model import Flow
 from langflow.services.database.models.user.model import User
-from langflow.services.store.utils import get_lf_version_from_pypi
 from langflow.utils.constants import LANGFLOW_GLOBAL_VAR_HEADER_PREFIX
-
-if TYPE_CHECKING:
-    from langflow.services.store.schema import StoreComponentCreate
-
 
 API_WORDS = ["api", "key", "token"]
 
@@ -260,24 +255,6 @@ def validate_is_component(flows: list[Flow]) -> list[Flow]:
 def get_is_component_from_data(data: dict):
     """Returns True if the data is a component."""
     return data.get("is_component")
-
-
-async def check_langflow_version(component: StoreComponentCreate) -> None:
-    from langflow.utils.version import get_version_info
-
-    __version__ = get_version_info()["version"]
-
-    if not component.last_tested_version:
-        component.last_tested_version = __version__
-
-    langflow_version = await get_lf_version_from_pypi()
-    if langflow_version is None:
-        raise HTTPException(status_code=500, detail="Unable to verify the latest version of Langflow")
-    if langflow_version != component.last_tested_version:
-        await logger.awarning(
-            f"Your version of Langflow ({component.last_tested_version}) is outdated. "
-            f"Please update to the latest version ({langflow_version}) and try again."
-        )
 
 
 def format_elapsed_time(elapsed_time: float) -> str:

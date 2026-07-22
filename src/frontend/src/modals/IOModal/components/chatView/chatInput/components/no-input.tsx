@@ -54,14 +54,7 @@ const NoInputView: React.FC<NoInputViewProps> = ({
           <Trans
             i18nKey="playground.noInputHint"
             components={{
-              1: (
-                <a
-                  className="underline underline-offset-4"
-                  target="_blank"
-                  href="https://docs.langflow.org/components-io#chat-input"
-                  rel="noopener noreferrer"
-                />
-              ),
+              1: <span className="font-medium text-foreground" />,
             }}
           />
         </p>

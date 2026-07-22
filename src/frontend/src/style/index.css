@@ -2,13 +2,53 @@
 @tailwind components;
 @tailwind utilities;
 
+@font-face {
+  font-family: "Pretendard Variable";
+  src: url("/fonts/PretendardVariable.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 45 920;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Medium.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Bold.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/JetBrainsMono-Italic.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+}
+
 /* TODO: Confirm that all colors here are found in tailwind config */
 
 @layer base {
   :root {
-    --font-sans: "Inter", sans-serif;
+    --font-sans: "Pretendard Variable", sans-serif;
     --font-mono: "JetBrains Mono", monospace;
-    --font-chivo: "Chivo", sans-serif;
+    --font-display: "Pretendard Variable", sans-serif;
 
     --foreground: 0 0% 0%; /* hsl(0, 0%, 0%) */
     --background: 0 0% 100%; /* hsl(0, 0%, 100%) */
@@ -55,10 +95,9 @@
     --accent-pink: 326, 78%, 95%; /* hsl(326, 78%, 95%) */
     --accent-pink-foreground: 333 71% 51%; /* hsl(333, 71%, 51%) */
 
-    /* Langflow Assistant brand palette — kept identical in light and dark
-       so the assistant glyph + input glow read the same in either theme. */
-    --accent-assistant-brand: 335 100% 60%; /* #FF3276 — assistant pink */
-    --accent-assistant-purple: 270 100% 73%; /* #BA75FF — assistant purple */
+    /* Unnest Assistant uses the product's blue accent palette. */
+    --accent-assistant-brand: 217 91% 60%;
+    --accent-assistant-purple: 213 94% 68%;
 
     --accent-purple-muted: 271 100% 64% / 0.2; /* #AD46FF33 */
     --accent-purple-muted-foreground: 271 100% 74%; /* #C27AFF */
@@ -89,7 +128,6 @@
     --round-btn-shadow: #00000063;
     --ice: #31a3cc;
     --selected: #2196f3;
-    --discord-color: #5765f2;
 
     --error-background: #fef2f2;
     --error-foreground: #991b1b;
@@ -112,8 +150,8 @@
     --chat-bot-icon: #afe6ef;
     --chat-user-icon: #aface9;
 
-    --component-icon: #d8598a;
-    --flow-icon: #2f67d0;
+    --component-icon: #3b82f6;
+    --flow-icon: #1d4ed8;
     --hover: #f2f4f5;
     --disabled-run: #6366f1;
 
@@ -261,8 +299,8 @@
     --accent-pink: 336, 69%, 30%; /* hsl(336, 69%, 30%) */
     --accent-pink-foreground: 329 86% 70%; /* hsl(329, 86%, 70%) */
     /* Brand colors stay identical in dark mode — see :root for rationale. */
-    --accent-assistant-brand: 335 100% 60%; /* #FF3276 — assistant pink */
-    --accent-assistant-purple: 270 100% 73%; /* #BA75FF — assistant purple */
+    --accent-assistant-brand: 213 94% 68%;
+    --accent-assistant-purple: 217 91% 60%;
     --accent-purple-muted: 271 100% 64% / 0.2; /* #AD46FF33 */
     --accent-purple-muted-foreground: 271 100% 74%; /* #C27AFF */
     --accent-purple-foreground: 270, 95%, 75%;
@@ -383,7 +421,6 @@
     --hover: #1a202e;
     --disabled-run: #6366f1;
     --selected: #0369a1;
-    --discord-color: #5765f2;
 
     --filter-foreground: #eef2ff;
     --filter-background: #4e46e599;
@@ -404,8 +441,8 @@
     --medium-indigo: #6366f1;
     --low-indigo: #e0e7ff;
 
-    --component-icon: #c35f85;
-    --flow-icon: #2467e4;
+    --component-icon: #60a5fa;
+    --flow-icon: #3b82f6;
 
     --build-trigger: #dc735b;
     --chat-trigger: #5c8be1;

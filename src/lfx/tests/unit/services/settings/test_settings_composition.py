@@ -126,10 +126,6 @@ EXPECTED_FIELDS = {
     "max_text_length",
     "max_items_length",
     "frontend_timeout",
-    "store",
-    "store_url",
-    "download_webhook_url",
-    "like_webhook_url",
     # RuntimeSettings
     "dev",
     "event_delivery",

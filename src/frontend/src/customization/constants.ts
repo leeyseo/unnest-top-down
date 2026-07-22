@@ -1,4 +1,3 @@
-//Langflow Desktop Base URL
 export const baseURL = "";
 
 export const customDefaultShortcuts = [
@@ -31,11 +30,6 @@ export const customDefaultShortcuts = [
     display_name: "Duplicate",
     name: "Duplicate",
     shortcut: "mod+d",
-  },
-  {
-    display_name: "Docs",
-    name: "Docs",
-    shortcut: "mod+shift+d",
   },
   {
     display_name: "Changes Save",

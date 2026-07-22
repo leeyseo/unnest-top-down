@@ -15,7 +15,7 @@ async def test_add_user_public_signup(client: AsyncClient):
     assert "is_superuser" in result, "The result must have an 'is_superuser' key"
     assert "last_login_at" in result, "The result must have an 'last_login_at' key"
     assert "profile_image" in result, "The result must have an 'profile_image' key"
-    assert "store_api_key" in result, "The result must have an 'store_api_key' key"
+    assert "store_api_key" not in result
     assert "updated_at" in result, "The result must have an 'updated_at' key"
     assert "username" in result, "The result must have an 'username' key"
     assert result["username"] == "newuser", "The username must match"
@@ -142,7 +142,7 @@ async def test_add_user(client: AsyncClient, logged_in_headers_super_user):
     assert "is_superuser" in result, "The result must have an 'is_superuser' key"
     assert "last_login_at" in result, "The result must have an 'last_login_at' key"
     assert "profile_image" in result, "The result must have an 'profile_image' key"
-    assert "store_api_key" in result, "The result must have an 'store_api_key' key"
+    assert "store_api_key" not in result
     assert "updated_at" in result, "The result must have an 'updated_at' key"
     assert "username" in result, "The result must have an 'username' key"
 
@@ -158,7 +158,7 @@ async def test_read_current_user(client: AsyncClient, logged_in_headers):
     assert "is_superuser" in result, "The result must have an 'is_superuser' key"
     assert "last_login_at" in result, "The result must have an 'last_login_at' key"
     assert "profile_image" in result, "The result must have an 'profile_image' key"
-    assert "store_api_key" in result, "The result must have an 'store_api_key' key"
+    assert "store_api_key" not in result
     assert "updated_at" in result, "The result must have an 'updated_at' key"
     assert "username" in result, "The result must have an 'username' key"
 
@@ -190,7 +190,7 @@ async def test_patch_user(client: AsyncClient, logged_in_headers_super_user):
     assert "is_superuser" in result, "The result must have an 'is_superuser' key"
     assert "last_login_at" in result, "The result must have an 'last_login_at' key"
     assert "profile_image" in result, "The result must have an 'profile_image' key"
-    assert "store_api_key" in result, "The result must have an 'store_api_key' key"
+    assert "store_api_key" not in result
     assert "updated_at" in result, "The result must have an 'updated_at' key"
     assert "username" in result, "The result must have an 'username' key"
     assert result["username"] == updated_name, "The username must be updated"
@@ -209,7 +209,7 @@ async def test_reset_password(client: AsyncClient, logged_in_headers, active_use
     assert "is_superuser" in result, "The result must have an 'is_superuser' key"
     assert "last_login_at" in result, "The result must have an 'last_login_at' key"
     assert "profile_image" in result, "The result must have an 'profile_image' key"
-    assert "store_api_key" in result, "The result must have an 'store_api_key' key"
+    assert "store_api_key" not in result
     assert "updated_at" in result, "The result must have an 'updated_at' key"
     assert "username" in result, "The result must have an 'username' key"
 

@@ -1,7 +1,7 @@
 ---
 version: alpha
-name: Langflow
-description: Visual AI workflow builder for composing LLM-powered applications
+name: Unnest
+description: AI workflow를 시각적으로 설계하고 실행하는 플랫폼
 colors:
   # Core UI palette
   primary: "#000000"
@@ -143,15 +143,14 @@ colors:
   cosmic-void: "#1A0250"
 
   # Brand-specific UI
-  component-icon: "#D8598A"
-  flow-icon: "#2F67D0"
+  component-icon: "#3B82F6"
+  flow-icon: "#1D4ED8"
   chat-bot-icon: "#AFE6EF"
   chat-user-icon: "#AFACE9"
   build-trigger: "#DC735B"
   chat-trigger: "#5C8BE1"
   chat-send: "#000000"
   ice: "#31A3CC"
-  discord: "#5765F2"
 
   # Sidebar (dark mode only -- light mode inherits core tokens)
   sidebar-background: "#18181B"
@@ -165,63 +164,63 @@ colors:
 
 typography:
   headline-lg:
-    fontFamily: Inter
+    fontFamily: Pretendard Variable
     fontSize: 30px
     fontWeight: 700
     lineHeight: 1.2
     letterSpacing: -0.02em
   headline-md:
-    fontFamily: Inter
+    fontFamily: Pretendard Variable
     fontSize: 24px
     fontWeight: 600
     lineHeight: 1.3
   headline-sm:
-    fontFamily: Inter
+    fontFamily: Pretendard Variable
     fontSize: 20px
     fontWeight: 600
     lineHeight: 1.4
   body-lg:
-    fontFamily: Inter
+    fontFamily: Pretendard Variable
     fontSize: 16px
     fontWeight: 400
     lineHeight: 1.6
   body-md:
-    fontFamily: Inter
+    fontFamily: Pretendard Variable
     fontSize: 14px
     fontWeight: 400
     lineHeight: 1.5
   body-sm:
-    fontFamily: Inter
+    fontFamily: Pretendard Variable
     fontSize: 13px
     fontWeight: 400
     lineHeight: 1.5
   body-xs:
-    fontFamily: Inter
+    fontFamily: Pretendard Variable
     fontSize: 12px
     fontWeight: 400
     lineHeight: 1.5
   body-xxs:
-    fontFamily: Inter
+    fontFamily: Pretendard Variable
     fontSize: 11px
     fontWeight: 400
     lineHeight: 1.4
   label-lg:
-    fontFamily: Inter
+    fontFamily: Pretendard Variable
     fontSize: 14px
     fontWeight: 500
     lineHeight: 1.4
   label-md:
-    fontFamily: Inter
+    fontFamily: Pretendard Variable
     fontSize: 13px
     fontWeight: 500
     lineHeight: 1.4
   label-sm:
-    fontFamily: Inter
+    fontFamily: Pretendard Variable
     fontSize: 12px
     fontWeight: 500
     lineHeight: 1.3
   label-xs:
-    fontFamily: Inter
+    fontFamily: Pretendard Variable
     fontSize: 11px
     fontWeight: 500
     lineHeight: 1.3
@@ -236,7 +235,7 @@ typography:
     fontWeight: 400
     lineHeight: 1.5
   display:
-    fontFamily: Chivo
+    fontFamily: Pretendard Variable
     fontSize: 36px
     fontWeight: 700
     lineHeight: 1.1
@@ -509,9 +508,9 @@ components:
 
 ## Overview
 
-Langflow is a visual AI workflow builder where users compose LLM-powered applications by dragging, connecting, and configuring modular components on an infinite canvas. The design language is that of a professional developer tool -- clean, information-dense, and deliberately restrained. Color is earned, not decorative; every hue in the system carries semantic meaning.
+Unnest is a platform for visually designing and running AI workflows by dragging, connecting, and configuring modular components on an infinite canvas. The design language is that of a professional developer tool -- clean, information-dense, and deliberately restrained. Color is earned, not decorative; every hue in the system carries semantic meaning.
 
-The aesthetic sits between a code editor and a node-based creative tool. The core UI is strictly monochromatic -- black primary on white, with a warm zinc-gray scale for layering. This neutral foundation lets the **data type color system** (14 distinct hues encoding connection compatibility) and **accent families** (emerald for success, indigo for selection, pink for components) communicate meaning without competing for attention. The result is an interface that feels focused and engineered: complexity emerges from the user's composition, not from the UI itself.
+The aesthetic sits between a code editor and a node-based creative tool. The core UI is strictly monochromatic -- black primary on white, with a warm zinc-gray scale for layering. This neutral foundation lets the **data type color system** (14 distinct hues encoding connection compatibility) and **accent families** (emerald for success, indigo for selection, blue for product actions) communicate meaning without competing for attention. The result is an interface that feels focused and engineered: complexity emerges from the user's composition, not from the UI itself.
 
 Light and dark themes are fully supported via class-based toggling (`.dark` on root). The dark theme uses a deep zinc-black (#18181B) as its foundation, not a tinted dark blue, keeping the neutral character consistent across both modes.
 
@@ -534,7 +533,7 @@ Accents that serve as **background / foreground pairs** for badges, tags, and co
 
 - **Emerald** (#D1F9E4 / #047857): Success, completion, enabled states, "built" indicators. Hover: #A7F3D0.
 - **Indigo** (#E0E7FF / #4F46E5): Node selection, active filters, focus indicators. Also used for the indigo scale (high: #4338CA, medium: #6366F1, low: #E0E7FF).
-- **Pink** (#FCE8F3 / #BE185D): Component icons, feminine-coded accents, static badges.
+- **Blue** (#DBEAFE / #2563EB): Product actions, component icons, and branded highlights.
 - **Amber** (#FCE68A / #B45309): Warnings, caution badges. The background is a pale yellow; the foreground is burnt orange.
 
 **Standalone accent references** (used for text color, icons, and links -- not as bg/fg pairs):
@@ -555,7 +554,7 @@ Used for build status indicators, connection health, and real-time feedback dots
 
 ### Data Type Color System
 
-Langflow uses **14 distinct hues** to encode the type of data flowing through node connections. Each type has a saturated foreground and a light-tint background. In **light mode**, the base token is the saturated color (used for port dots and connection lines) and the `-foreground` token is the light tint (used for backgrounds). In **dark mode, these roles swap** -- the base becomes the light tint and the foreground becomes the saturated color. This ensures readability against both light and dark surfaces.
+Unnest uses **14 distinct hues** to encode the type of data flowing through node connections. Each type has a saturated foreground and a light-tint background. In **light mode**, the base token is the saturated color (used for port dots and connection lines) and the `-foreground` token is the light tint (used for backgrounds). In **dark mode, these roles swap** -- the base becomes the light tint and the foreground becomes the saturated color. This ensures readability against both light and dark surfaces.
 
 | Data Type | Color Name | Hex (saturated) | Used For |
 |:----------|:-----------|:-----------------|:---------|
@@ -589,13 +588,22 @@ Used for flow icon gradients, tool-mode indicators, and decorative color swatche
 
 ## Typography
 
-Three font families serve distinct roles in the interface.
+Two self-hosted font families serve distinct roles in the interface.
 
-- **Inter** (sans-serif, variable, 14-32 optical size): The primary UI typeface. Used for all headings, body text, labels, navigation, buttons, and form elements. Its large optical-size range and variable weight (100-900) provide precise control without font-switching. The neutral, geometric character keeps the UI professional and out of the way.
+- **Pretendard Variable** (sans-serif, variable): The primary UI and display typeface. Used for headings, body text, labels, navigation, buttons, form elements, onboarding, and the Unnest wordmark. It provides consistent Korean and Latin typography across platforms.
 
-- **JetBrains Mono** (monospace, variable): Used exclusively for code -- code blocks, JSON editors, API keys, component IDs, and any machine-readable content. Its programming ligatures and distinct character shapes (especially `0` vs `O`, `1` vs `l`) aid readability in dense technical contexts. Never used for UI labels or headings.
+- **JetBrains Mono** (monospace): Used exclusively for code -- code blocks, JSON editors, API keys, component IDs, and any machine-readable content. Its programming ligatures and distinct character shapes (especially `0` vs `O`, `1` vs `l`) aid readability in dense technical contexts. Never used for UI labels or headings.
 
-- **Chivo** (display, variable): Reserved for marketing-facing or splash contexts (landing pages, onboarding screens). Its slightly condensed, geometric character adds personality at large sizes. Never used within the application workspace.
+Both families are bundled with the frontend. The product must not depend on external font CDNs.
+
+## Brand
+
+- Display the brand name as **Unnest** only; do not display the Korean transliteration.
+- The primary lockup is the supplied symbol on the left with a Pretendard Bold `Unnest` wordmark on the right.
+- Use the full lockup on authentication and welcome surfaces. Use the symbol alone in compact navigation, loading, and chat-avatar contexts.
+- Render the symbol black in light mode and white in dark mode. The favicon uses a black background with a white symbol.
+- Keep the structural palette monochromatic. Blue remains the interaction, selection, and link accent.
+- Korean is the default language for new users. Keep technical terms such as Flow, Component, API, MCP, and workflow in English when translation would reduce clarity.
 
 The type scale is compact. The application uses 11px (`xxs`) through 16px (`base`) for the vast majority of UI. Headlines rarely exceed 24px inside the workspace. Density is preferred over visual hierarchy through size alone -- hierarchy is communicated through weight, color, and spatial grouping.
 
@@ -723,7 +731,7 @@ Rounded bordered containers with icon + text layout. Default variant uses standa
 
 ### Canvas Nodes
 
-The core UI element of Langflow. Each node is a white rounded card on the canvas containing typed input/output ports, configuration fields, and a status indicator.
+The core UI element of Unnest. Each node is a white rounded card on the canvas containing typed input/output ports, configuration fields, and a status indicator.
 
 - **Port dots** use the data type color system to visually encode connection compatibility. When two ports share a compatible type, their colors match, providing immediate visual feedback.
 - **Selected nodes** show an indigo ring (`node-selected: #4F46E5`) replacing the standard border.
@@ -739,14 +747,14 @@ Collapsible panel (19rem expanded, 4rem icon-only) with smooth 300ms width trans
 
 - Do use the monochromatic core palette for all structural UI -- reserve color for semantic meaning
 - Do maintain WCAG AA contrast ratios (4.5:1 for normal text, 3:1 for large text and interactive elements)
-- Do use Inter for all application UI text; JetBrains Mono only for code and machine-readable content
+- Do use Pretendard Variable for all application UI text; JetBrains Mono only for code and machine-readable content
 - Do keep data type colors visually distinct -- they encode connection compatibility and must be recognizable at small sizes (port dots, connection lines)
 - Do support both light and dark themes -- every color token must have a dark-mode equivalent
 - Do use the 4px base grid for all spacing decisions
 - Don't introduce new accent colors without a clear semantic role in the system
 - Don't use shadows heavier than the node shadow -- the UI should feel flat, layered through tone rather than depth
 - Don't mix border-radius values within the same visual group (all buttons in a toolbar share the same radius)
-- Don't use Chivo inside the application workspace -- it is reserved for marketing and onboarding contexts
+- Don't load fonts from external CDNs -- both product font families are self-hosted
 - Don't use opacity below 0.7 for disabled states -- the element must remain readable
 - Don't use solid color fills for hover states on ghost/outline buttons -- use the accent or muted surface tokens
 - Don't place data type colors on structural UI elements (borders, backgrounds) outside of the node/port system

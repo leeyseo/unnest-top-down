@@ -1,7 +1,6 @@
 import { useTranslation } from "react-i18next";
 import IconComponent from "@/components/common/genericIconComponent";
 import ShadTooltip from "@/components/common/shadTooltipComponent";
-import { convertTestName } from "@/components/common/storeCardComponent/utils/convert-test-name";
 import {
   Select,
   SelectContent,
@@ -50,7 +49,8 @@ export const SelectOptions = ({
             className="w-fit"
             id={`options-trigger-${item.name}`}
             data-testid={
-              "more-options-button" + `_${convertTestName(item?.name ?? "")}`
+              "more-options-button" +
+              `_${(item?.name ?? "").replaceAll(" ", "-").toLowerCase()}`
             }
           >
             <IconComponent

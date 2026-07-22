@@ -5,7 +5,6 @@ import { Button } from "../../ui/button";
 import { Card, CardContent, CardFooter, CardHeader } from "../../ui/card";
 
 export default function CrashErrorComponent({
-  error,
   resetErrorBoundary,
 }: crashComponentPropsType): JSX.Element {
   const { t } = useTranslation();
@@ -27,20 +26,7 @@ export default function CrashErrorComponent({
 
             <CardContent className="grid">
               <div>
-                <p>
-                  {t("crash.descriptionBefore")}{" "}
-                  <a
-                    href="https://github.com/langflow-ai/langflow/issues"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="font-medium hover:underline"
-                  >
-                    {t("crash.githubIssues")}
-                  </a>{" "}
-                  {t("crash.descriptionAfter")}
-                  <br></br>
-                  {t("crash.thankYou")}
-                </p>
+                <p>{t("crash.description")}</p>
               </div>
             </CardContent>
 
@@ -49,16 +35,6 @@ export default function CrashErrorComponent({
                 <Button onClick={resetErrorBoundary}>
                   {t("crash.restartButton")}
                 </Button>
-
-                <a
-                  href="https://github.com/langflow-ai/langflow/issues/new"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <Button className="ml-3" ignoreTitleCase variant={"outline"}>
-                    {t("crash.reportButton")}
-                  </Button>
-                </a>
               </div>
             </CardFooter>
           </Card>

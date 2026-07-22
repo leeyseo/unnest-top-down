@@ -36,7 +36,6 @@ async def test_openai_response_stream_error_handling(client):
             create_at=now,
             updated_at=now,
             profile_image=None,
-            store_api_key=None,
             last_login_at=None,
             optins=None,
         )

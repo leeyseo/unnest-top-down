@@ -10,8 +10,6 @@ import {
 } from "@/components/ui/popover";
 import { Select, SelectTrigger } from "@/components/ui/select-custom";
 import { COLOR_OPTIONS } from "@/constants/constants";
-import { customOpenNewTab } from "@/customization/utils/custom-open-new-tab";
-import useAlertStore from "@/stores/alertStore";
 import useFlowStore from "@/stores/flowStore";
 import useFlowsManagerStore from "@/stores/flowsManagerStore";
 import { useShortcutsStore } from "@/stores/shortcuts";
@@ -30,7 +28,6 @@ const NoteToolbarComponent = memo(function NoteToolbarComponent({
   bgColor,
 }: NoteToolbarProps) {
   const { t } = useTranslation();
-  const setNoticeData = useAlertStore((state) => state.setNoticeData);
   const takeSnapshot = useFlowsManagerStore((state) => state.takeSnapshot);
   const shortcuts = useShortcutsStore((state) => state.shortcuts);
 
@@ -49,24 +46,12 @@ const NoteToolbarComponent = memo(function NoteToolbarComponent({
       ),
     );
 
-  /** Opens documentation URL or shows notice if unavailable */
-  const openDocs = useCallback(() => {
-    if (data.node?.documentation) {
-      return customOpenNewTab(data.node.documentation);
-    }
-    setNoticeData({ title: t("node.docsUnavailable", { id: data.id }) });
-  }, [data.node?.documentation, data.id, setNoticeData]);
-
-  /** Handles toolbar menu actions: copy, duplicate, delete, documentation */
+  /** Handles toolbar menu actions: copy, duplicate, and delete. */
   const handleSelectChange = useCallback(
     (action: string) => {
       const currentNode = nodes.find((node) => node.id === data.id);
 
       switch (action) {
-        case "documentation":
-          openDocs();
-          break;
-
         case "delete":
           takeSnapshot();
           deleteNode(data.id);
@@ -96,15 +81,7 @@ const NoteToolbarComponent = memo(function NoteToolbarComponent({
           break;
       }
     },
-    [
-      openDocs,
-      takeSnapshot,
-      deleteNode,
-      data.id,
-      nodes,
-      setLastCopiedSelection,
-      paste,
-    ],
+    [takeSnapshot, deleteNode, data.id, nodes, setLastCopiedSelection, paste],
   );
 
   const isCustomColor =
@@ -163,7 +140,7 @@ const NoteToolbarComponent = memo(function NoteToolbarComponent({
               </div>
             </ShadTooltip>
           </SelectTrigger>
-          <SelectItems shortcuts={shortcuts} data={data} />
+          <SelectItems shortcuts={shortcuts} />
         </Select>
       </span>
     </div>

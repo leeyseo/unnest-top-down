@@ -61,12 +61,6 @@ describe("HelpDropdownView", () => {
     const onOpenChange = jest.fn();
     const onToggleHelperLines = jest.fn();
     const navigateTo = jest.fn();
-    const openLink = jest.fn();
-    const urls = {
-      docs: "https://docs",
-      bugReport: "https://bugs",
-      desktop: "https://desktop",
-    };
 
     render(
       <HelpDropdownView
@@ -75,26 +69,11 @@ describe("HelpDropdownView", () => {
         helperLineEnabled={false}
         onToggleHelperLines={onToggleHelperLines}
         navigateTo={navigateTo}
-        openLink={openLink}
-        urls={urls}
       />,
     );
 
-    fireEvent.click(screen.getByTestId("canvas_controls_dropdown_docs"));
-    expect(openLink).toHaveBeenCalledWith("https://docs");
-
     fireEvent.click(screen.getByTestId("canvas_controls_dropdown_shortcuts"));
     expect(navigateTo).toHaveBeenCalledWith("/settings/shortcuts");
-
-    fireEvent.click(
-      screen.getByTestId("canvas_controls_dropdown_report_a_bug"),
-    );
-    expect(openLink).toHaveBeenCalledWith("https://bugs");
-
-    fireEvent.click(
-      screen.getByTestId("canvas_controls_dropdown_get_langflow_desktop"),
-    );
-    expect(openLink).toHaveBeenCalledWith("https://desktop");
 
     fireEvent.click(
       screen.getByTestId("canvas_controls_dropdown_enable_smart_guides"),

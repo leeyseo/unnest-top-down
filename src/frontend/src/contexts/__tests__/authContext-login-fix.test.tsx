@@ -59,19 +59,6 @@ jest.mock("@/stores/authStore", () => ({
   default: mockAuthStore,
 }));
 
-const mockCheckHasStore = jest.fn();
-const mockFetchApiData = jest.fn();
-
-jest.mock("@/stores/storeStore", () => ({
-  useStoreStore: (selector: any) => {
-    const state = {
-      checkHasStore: mockCheckHasStore,
-      fetchApiData: mockFetchApiData,
-    };
-    return selector(state);
-  },
-}));
-
 jest.mock("@/stores/darkStore", () => ({
   useDarkStore: {
     getState: () => ({ refreshStars: jest.fn() }),
@@ -343,14 +330,11 @@ describe("AuthContext - Login Fix for Race Condition", () => {
         jest.advanceTimersByTime(50);
       });
 
-      // Complete getUser - should call checkHasStore and fetchApiData
+      // Complete getUser
       act(() => {
         const getUserCallback = mockMutateLoggedUser.mock.calls[0][1].onSuccess;
         getUserCallback(mockUserData);
       });
-
-      expect(mockCheckHasStore).toHaveBeenCalled();
-      expect(mockFetchApiData).toHaveBeenCalled();
 
       // Complete globalVariables
       act(() => {
@@ -459,9 +443,6 @@ describe("AuthContext - Login Fix for Race Condition", () => {
       });
 
       // Verify user data processed
-      expect(mockCheckHasStore).toHaveBeenCalled();
-      expect(mockFetchApiData).toHaveBeenCalled();
-
       // Verify isAuthenticated STILL not set
       expect(mockSetIsAuthenticated).not.toHaveBeenCalled();
 
