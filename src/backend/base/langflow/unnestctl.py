@@ -31,6 +31,7 @@ SHA256_HEX_LENGTH = 64
 MAX_ACCEPTANCE_TESTS = 100
 MIN_HTTP_STATUS = 100
 MAX_HTTP_STATUS = 599
+MAX_TCP_PORT = 65535
 
 
 class PackageValidationError(ValueError):
@@ -183,6 +184,19 @@ def _endpoint_ready(endpoint: str) -> bool:
         return False
 
 
+def _tcp_port_available(port: int, host: str = "") -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+            listener.bind((host, port))
+    except PermissionError:
+        # Docker/Podman may be allowed to publish a privileged port even when
+        # the invoking unprivileged user cannot bind it directly.
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def preflight(package: Path) -> list[str]:
     manifest = verify_package(package)
     if platform.system() != "Linux":
@@ -217,6 +231,24 @@ def preflight(package: Path) -> list[str]:
     unreachable = [endpoint for endpoint in manifest.get("external_endpoints", []) if not _endpoint_ready(endpoint)]
     if unreachable:
         raise PackageValidationError(f"Required endpoints are unreachable: {', '.join(unreachable)}")
+    host_ports: list[int] = []
+    for binding in manifest.get("ports", []):
+        if not isinstance(binding, dict):
+            raise PackageValidationError("Release manifest contains an invalid port binding")
+        port = binding.get("port")
+        if (
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or not 1 <= port <= MAX_TCP_PORT
+            or binding.get("protocol") != "tcp"
+            or binding.get("scope") not in {"host", "internal"}
+        ):
+            raise PackageValidationError("Release manifest contains an invalid port binding")
+        if binding["scope"] == "host":
+            host_ports.append(port)
+    occupied = sorted({port for port in host_ports if not _tcp_port_available(port)})
+    if occupied:
+        raise PackageValidationError(f"Required host ports are unavailable: {', '.join(map(str, occupied))}")
     return [
         f"release={manifest.get('release_version')}",
         f"architecture={architecture}",

@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import socket
 import sqlite3
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from langflow.services.runtime_backup import RuntimeBackupFile, create_runtime_b
 from langflow.services.runtime_setup import generate_age_recovery_key
 from langflow.unnestctl import (
     PackageValidationError,
+    _tcp_port_available,
     app,
     preflight,
     run_acceptance,
@@ -121,6 +123,16 @@ def test_preflight_rejects_non_linux_host(tmp_path, monkeypatch):
 
     with pytest.raises(PackageValidationError, match="Only Linux"):
         preflight(package)
+
+
+def test_preflight_port_probe_detects_a_bound_tcp_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+
+        assert _tcp_port_available(port, "127.0.0.1") is False
+
+    assert _tcp_port_available(port, "127.0.0.1") is True
 
 
 def test_acceptance_runs_signed_required_tests_and_sends_api_key(tmp_path):

@@ -195,6 +195,14 @@ async def test_create_on_prem_release_from_saved_versions(
     assert body["manifest"]["provider"] == "unnest-on-prem"
     assert [flow["role"] for flow in body["manifest"]["flows"]] == ["agent", "ingestion"]
     assert body["manifest"]["secret_names"] == []
+    assert {"runtime", "redis", "postgresql", "prometheus"}.issubset(body["manifest"]["services"])
+    assert {
+        "service": "runtime",
+        "name": "https",
+        "port": 443,
+        "protocol": "tcp",
+        "scope": "host",
+    } in body["manifest"]["ports"]
     assert body["manifest"]["api"]["input_mapping"]["message"]["component_id"] == "agent-input"
     assert body["manifest"]["acceptance_tests"][0] == {
         "name": "health",

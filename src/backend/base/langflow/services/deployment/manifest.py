@@ -56,6 +56,16 @@ _DEPENDENCY_KINDS = ("python_packages", "os_packages", "binaries")
 _MIN_HTTP_STATUS = 100
 _MAX_HTTP_STATUS = 599
 _DIRECT_CONVERSATION_STORE_TYPES = {"messagestore", "storemessage"}
+_SERVICE_PORTS = {
+    "runtime": [("http", 7860)],
+    "postgresql": [("postgresql", 5432)],
+    "redis": [("redis", 6379)],
+    "minio": [("api", 9000), ("console", 9001)],
+    "clamav": [("clamd", 3310)],
+    "prometheus": [("http", 9090)],
+    "grafana": [("http", 3000)],
+    "ollama": [("http", 11434)],
+}
 
 
 @dataclass(frozen=True)
@@ -105,6 +115,47 @@ def _conversation_persistence_components(data: dict[str, Any]) -> list[str]:
         if stores_directly:
             components.append(str(node.get("id") or node_type or "<unknown>"))
     return sorted(set(components))
+
+
+def _deployment_services(config: OnPremDeploymentConfig, detected: set[str]) -> list[str]:
+    services = {*detected, "runtime", "redis"}
+    if config.database == "embedded-postgresql":
+        services.add("postgresql")
+    if config.storage == "minio":
+        services.add("minio")
+    if config.model_runtime == "bundled":
+        services.add("ollama")
+    if config.features.clamav:
+        services.add("clamav")
+    if config.features.monitoring:
+        services.add("prometheus")
+    if config.features.grafana:
+        services.add("grafana")
+    return sorted(services)
+
+
+def _deployment_ports(services: list[str]) -> list[dict[str, Any]]:
+    ports = [
+        {
+            "service": "runtime",
+            "name": "https",
+            "port": 443,
+            "protocol": "tcp",
+            "scope": "host",
+        }
+    ]
+    ports.extend(
+        {
+            "service": service,
+            "name": name,
+            "port": port,
+            "protocol": "tcp",
+            "scope": "internal",
+        }
+        for service in services
+        for name, port in _SERVICE_PORTS.get(service, [])
+    )
+    return ports
 
 
 def _validate_json_schema(schema: dict[str, Any], name: str) -> list[str]:
@@ -743,6 +794,7 @@ async def analyze_release(
         if config.orchestrator == "compose"
         else ["helm/unnest/Chart.yaml", "helm/unnest/values.yaml"]
     )
+    deployment_services = _deployment_services(config, services)
     manifest = {
         "schema_version": 1,
         "provider": "unnest-on-prem",
@@ -772,7 +824,8 @@ async def analyze_release(
             ),
         },
         "deployment": config.model_dump(mode="json"),
-        "services": sorted(services),
+        "services": deployment_services,
+        "ports": _deployment_ports(deployment_services),
         "external_endpoints": sorted(endpoints),
         "secret_names": sorted(name for name in secrets if name),
         "dependency_lock": dependency_lock,
