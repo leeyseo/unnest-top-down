@@ -378,8 +378,8 @@ def _validate_ingestion_contract(agent_data: dict[str, Any], ingestion_data: dic
 
     agent_aliases = _knowledge_aliases(agent_data)
     ingestion_aliases = _knowledge_aliases(ingestion_data)
-    if not agent_aliases.intersection(ingestion_aliases):
-        errors.append("Agent and Ingestion flows must reference the same Knowledge Base alias")
+    if len(agent_aliases) != 1 or agent_aliases != ingestion_aliases:
+        errors.append("Agent and Ingestion flows must reference exactly one shared Knowledge Base alias")
     return errors
 
 
@@ -429,6 +429,11 @@ async def analyze_release(
         errors.append("API examples must not contain plaintext credentials")
     if isinstance(agent_version.data, dict) and isinstance(ingestion_version.data, dict):
         errors.extend(_validate_ingestion_contract(agent_version.data, ingestion_version.data))
+    shared_knowledge_aliases = (
+        _knowledge_aliases(agent_version.data).intersection(_knowledge_aliases(ingestion_version.data))
+        if isinstance(agent_version.data, dict) and isinstance(ingestion_version.data, dict)
+        else set()
+    )
 
     subflows, subflow_errors = await _resolve_subflows(
         session,
@@ -490,6 +495,7 @@ async def analyze_release(
         "services": sorted(services),
         "external_endpoints": sorted(endpoints),
         "secret_names": sorted(name for name in secrets if name),
+        "knowledge_base_alias": next(iter(shared_knowledge_aliases), None),
         "sandbox": {
             "required": sandbox,
             "network_policy": "deny-by-default" if sandbox else "not-applicable",

@@ -52,12 +52,13 @@ class TaskService(Service):
         Returns:
             str: A task_id that can be used to track or cancel the task via JobQueueService.
         """
+        requested_task_id = kwargs.pop("_task_id", None)
         if self.use_celery:
             task_id, _ = self.backend.launch_task(task_func, *args, **kwargs)
             return task_id
 
         graph = kwargs.get("graph")
-        task_id = graph.run_id if graph and hasattr(graph, "run_id") else str(uuid4())
+        task_id = str(requested_task_id or (graph.run_id if graph and hasattr(graph, "run_id") else uuid4()))
         # Create a job queue for the task and track the job execution using the
         # JobQueueService
         job_queue_service = get_queue_service()
