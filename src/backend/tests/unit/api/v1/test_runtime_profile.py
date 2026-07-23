@@ -42,6 +42,7 @@ def test_runtime_profile_mounts_only_deployment_routes(monkeypatch):
     assert "/api/v1/admin/api-keys" in paths
     assert "/api/v1/admin/audit" in paths
     assert "/api/v1/admin/audit/checkpoints" in paths
+    assert "/api/v1/admin/license" in paths
     assert "/api/v1/admin/schedules" in paths
     assert "/api/v1/admin/schedules/{schedule_id}" in paths
     assert "/health" in paths

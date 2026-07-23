@@ -69,6 +69,7 @@ from langflow.services.runtime_document import (
     register_document,
     restore_document,
 )
+from langflow.services.runtime_license import runtime_license_status
 from langflow.services.runtime_metrics import (
     INGESTION_JOBS,
     LICENSE_VALID,
@@ -817,7 +818,12 @@ async def execute_scheduled_agent(schedule_id: UUID) -> None:
 @router.get("/ready")
 async def ready(session: DbSessionReadOnly) -> dict[str, str]:
     release = await _release_for_api(session)
-    return {"status": "ok", "release_version": release.version}
+    license_status = runtime_license_status(release.version)
+    return {
+        "status": "ok",
+        "release_version": release.version,
+        "license": "valid" if license_status["valid"] else str(license_status["reason"]),
+    }
 
 
 @router.get("/metrics")
@@ -838,14 +844,7 @@ async def runtime_metrics(session: DbSessionReadOnly) -> Response:
         if isinstance(value, int | float):
             QUEUE_VALUES.labels(name).set(value)
     SETUP_COMPLETE.set(int(_setup_complete()))
-    license_expires_at = os.getenv("UNNEST_LICENSE_EXPIRES_AT")
-    try:
-        expires_at = datetime.fromisoformat(license_expires_at.replace("Z", "+00:00")) if license_expires_at else None
-        if expires_at is not None and expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        LICENSE_VALID.set(int(expires_at is not None and expires_at > datetime.now(timezone.utc)))
-    except ValueError:
-        LICENSE_VALID.set(0)
+    LICENSE_VALID.set(int(runtime_license_status()["valid"]))
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -1015,6 +1014,15 @@ async def create_runtime_audit_checkpoint_route(
             detail=str(exc),
         ) from exc
     return RuntimeAuditCheckpoint.model_validate(checkpoint, from_attributes=True).model_dump(mode="json")
+
+
+@router.get("/api/v1/admin/license")
+async def get_runtime_license(
+    session: DbSessionReadOnly,
+    _admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> dict[str, Any]:
+    release = await _release_for_api(session)
+    return runtime_license_status(release.version)
 
 
 @router.get("/api/v1/admin/schedules")

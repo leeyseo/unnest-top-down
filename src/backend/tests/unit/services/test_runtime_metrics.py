@@ -37,8 +37,8 @@ async def test_runtime_metrics_endpoint_exports_ingestion_queue_and_setup(monkey
             return {"backend": "asyncio", "active_jobs": 3}
 
     monkeypatch.setenv("UNNEST_RUNTIME_SETUP_COMPLETE", "true")
-    monkeypatch.setenv("UNNEST_LICENSE_EXPIRES_AT", "2099-01-01T00:00:00Z")
     monkeypatch.setattr("langflow.api.v1.runtime.get_queue_service", lambda: Queue())
+    monkeypatch.setattr("langflow.api.v1.runtime.runtime_license_status", lambda *_args: {"valid": True})
 
     response = await runtime_metrics(Session())  # type: ignore[arg-type]
     metrics = response.body.decode()
