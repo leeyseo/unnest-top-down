@@ -207,6 +207,8 @@ class OnPremReleaseValidationResponse(BaseModel):
 
 
 class DeploymentArtifactRead(BaseModel):
+    id: UUID
+    build_id: UUID
     artifact_type: str
     location: str
     digest: str
@@ -237,3 +239,18 @@ class CriticalOverrideRequest(BaseModel):
     model_config = {"extra": "forbid"}
 
     reason: str = Field(min_length=10, max_length=2000)
+
+
+class RegistryPushRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    reference: str = Field(
+        min_length=1,
+        max_length=512,
+        pattern=r"^[a-z0-9.-]+(?::[0-9]+)?/[a-z0-9._/-]+:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$",
+    )
+    credential_secret_name: str = Field(
+        min_length=1,
+        max_length=255,
+        pattern=r"^[A-Za-z_][A-Za-z0-9_]*$",
+    )

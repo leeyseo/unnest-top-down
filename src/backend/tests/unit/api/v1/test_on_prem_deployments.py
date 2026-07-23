@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING, Any
 
 from fastapi import status
@@ -153,6 +154,7 @@ async def test_create_on_prem_release_from_saved_versions(
     class FakeWorker:
         payload = None
         sync_count = 0
+        artifact_content = b"offline-package"
 
         async def __aenter__(self):
             return self
@@ -180,12 +182,29 @@ async def test_create_on_prem_release_from_saved_versions(
                     WorkerArtifact(
                         artifact_type="tar",
                         location="release.tar",
-                        digest=f"sha256:{'a' * 64}",
-                        checksums={"release.tar": f"sha256:{'a' * 64}"},
+                        digest=f"sha256:{hashlib.sha256(self.artifact_content).hexdigest()}",
+                        size_bytes=len(self.artifact_content),
+                        checksums={
+                            "release.tar": f"sha256:{hashlib.sha256(self.artifact_content).hexdigest()}"
+                        },
                         sbom={"bomFormat": "CycloneDX"},
                         signature="cosign-signature",
                     )
                 ],
+            )
+
+        async def download_artifact(self, _job_id, _artifact_type):
+            return self.artifact_content
+
+        async def push_registry(self, _job_id, *, reference, credential_secret_name):
+            assert credential_secret_name == "REGISTRY_CREDENTIAL"  # noqa: S105
+            return WorkerArtifact(
+                artifact_type="registry",
+                location=reference,
+                digest=f"sha256:{hashlib.sha256(self.artifact_content).hexdigest()}",
+                checksums={"image": f"sha256:{hashlib.sha256(self.artifact_content).hexdigest()}"},
+                sbom={"bomFormat": "CycloneDX"},
+                signature="cosign-signature",
             )
 
     worker = FakeWorker()
@@ -228,6 +247,27 @@ async def test_create_on_prem_release_from_saved_versions(
     assert succeeded.status_code == status.HTTP_200_OK
     assert succeeded.json()["status"] == "succeeded"
     assert succeeded.json()["artifacts"][0]["expires_at"] is not None
+    artifact = succeeded.json()["artifacts"][0]
+
+    downloaded = await client.get(
+        f"/api/v1/deployments/on-prem/releases/{body['id']}/builds/{build['id']}"
+        f"/artifacts/{artifact['id']}/download",
+        headers=logged_in_headers,
+    )
+    assert downloaded.status_code == status.HTTP_200_OK
+    assert downloaded.content == worker.artifact_content
+    assert downloaded.headers["x-checksum-sha256"] == hashlib.sha256(worker.artifact_content).hexdigest()
+
+    pushed = await client.post(
+        f"/api/v1/deployments/on-prem/releases/{body['id']}/builds/{build['id']}/registry",
+        headers=logged_in_headers,
+        json={
+            "reference": "registry.internal/agency/unnest:1.0.0",
+            "credential_secret_name": "REGISTRY_CREDENTIAL",
+        },
+    )
+    assert pushed.status_code == status.HTTP_201_CREATED
+    assert pushed.json()["location"] == "registry.internal/agency/unnest:1.0.0"
 
     audit = await client.get(
         "/api/v1/authz/audit",

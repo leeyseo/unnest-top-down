@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, HTTPException, status
+from fastapi.responses import Response
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select
 
@@ -21,6 +23,7 @@ from langflow.api.v1.schemas.on_prem_deployments import (
     OnPremReleaseListResponse,
     OnPremReleaseRead,
     OnPremReleaseValidationResponse,
+    RegistryPushRequest,
 )
 from langflow.services.database.models.auth import AuthzAuditLog
 from langflow.services.database.models.deployment_release import (
@@ -93,6 +96,26 @@ async def _owned_build(
     if build is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Build not found")
     return release, build
+
+
+async def _owned_artifact(
+    session: DbSession | DbSessionReadOnly,
+    *,
+    release_id: UUID,
+    build_id: UUID,
+    artifact_id: UUID,
+    user_id: UUID,
+) -> tuple[DeploymentRelease, DeploymentBuild, DeploymentArtifact]:
+    release, build = await _owned_build(
+        session,
+        release_id=release_id,
+        build_id=build_id,
+        user_id=user_id,
+    )
+    artifact = await session.get(DeploymentArtifact, artifact_id)
+    if artifact is None or artifact.build_id != build.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
+    return release, build, artifact
 
 
 async def _build_read(session: DbSession | DbSessionReadOnly, build: DeploymentBuild) -> DeploymentBuildRead:
@@ -400,6 +423,150 @@ async def list_builds(
         )
     ).all()
     return DeploymentBuildListResponse(builds=[await _build_read(session, build) for build in builds])
+
+
+@router.get("/{release_id}/builds/{build_id}/artifacts/{artifact_id}/download")
+async def download_artifact(
+    release_id: UUID,
+    build_id: UUID,
+    artifact_id: UUID,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+) -> Response:
+    release, build, artifact = await _owned_artifact(
+        session,
+        release_id=release_id,
+        build_id=build_id,
+        artifact_id=artifact_id,
+        user_id=current_user.id,
+    )
+    if artifact.artifact_type not in {"tar", "package"}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only package artifacts can be downloaded",
+        )
+    if not build.worker_job_id or build.status != "succeeded":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Build artifact is not ready")
+    try:
+        async with _worker_client_or_503() as client:
+            content = await client.download_artifact(build.worker_job_id, artifact.artifact_type)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Artifact download failed") from exc
+    actual_digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
+    if actual_digest != artifact.digest or (artifact.size_bytes and len(content) != artifact.size_bytes):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Downloaded artifact failed integrity verification",
+        )
+    session.add(
+        AuthzAuditLog(
+            user_id=current_user.id,
+            action="deployment:artifact_download",
+            resource_type="deployment_artifact",
+            resource_id=artifact.id,
+            result="allow",
+            details={"release_id": str(release.id), "digest": artifact.digest},
+        )
+    )
+    await session.flush()
+    filename = f"unnest-{release.version}-{build.architecture}.tar"
+    return Response(
+        content,
+        media_type="application/x-tar",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Checksum-SHA256": artifact.digest.removeprefix("sha256:"),
+        },
+    )
+
+
+@router.post(
+    "/{release_id}/builds/{build_id}/registry",
+    response_model=DeploymentArtifactRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def push_build_to_registry(
+    release_id: UUID,
+    build_id: UUID,
+    payload: RegistryPushRequest,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+) -> DeploymentArtifactRead:
+    release, build = await _owned_build(
+        session,
+        release_id=release_id,
+        build_id=build_id,
+        user_id=current_user.id,
+    )
+    if build.status != "succeeded" or not build.worker_job_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Build is not ready for registry push")
+    try:
+        async with _worker_client_or_503() as client:
+            pushed = await client.push_registry(
+                build.worker_job_id,
+                reference=payload.reference,
+                credential_secret_name=payload.credential_secret_name,
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Registry push failed") from exc
+    if pushed.artifact_type != "registry" or pushed.location != payload.reference:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="BuildKit worker returned an invalid registry artifact",
+        )
+    if release.manifest.get("build", {}).get("signing_enabled") and not pushed.signature:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="BuildKit worker returned an unsigned registry artifact",
+        )
+    existing = (
+        await session.exec(
+            select(DeploymentArtifact).where(
+                DeploymentArtifact.build_id == build.id,
+                DeploymentArtifact.artifact_type == "registry",
+            )
+        )
+    ).first()
+    if existing is not None:
+        await session.delete(existing)
+        await session.flush()
+    pinned = bool(release.config.get("retention", {}).get("pinned"))
+    artifact = DeploymentArtifact(
+        build_id=build.id,
+        artifact_type=pushed.artifact_type,
+        location=pushed.location,
+        digest=pushed.digest,
+        size_bytes=pushed.size_bytes,
+        checksums=pushed.checksums,
+        sbom=pushed.sbom,
+        signature=pushed.signature,
+        pinned=pinned,
+        expires_at=(
+            None
+            if pinned
+            else datetime.now(timezone.utc)
+            + timedelta(days=int(release.config.get("retention", {}).get("days", 30)))
+        ),
+    )
+    session.add(artifact)
+    await session.flush()
+    session.add(
+        AuthzAuditLog(
+            user_id=current_user.id,
+            action="deployment:registry_push",
+            resource_type="deployment_artifact",
+            resource_id=artifact.id,
+            result="allow",
+            details={
+                "release_id": str(release.id),
+                "reference": payload.reference,
+                "digest": artifact.digest,
+                "credential_secret_name": payload.credential_secret_name,
+            },
+        )
+    )
+    await session.flush()
+    return DeploymentArtifactRead.model_validate(artifact, from_attributes=True)
 
 
 @router.post("/{release_id}/builds/{build_id}/sync", response_model=DeploymentBuildRead)

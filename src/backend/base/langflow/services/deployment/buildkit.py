@@ -24,7 +24,7 @@ _WORKER_KEY_ENV = "UNNEST_BUILDKIT_WORKER_KEY"
 class WorkerArtifact(BaseModel):
     model_config = {"extra": "forbid"}
 
-    artifact_type: str = Field(min_length=1)
+    artifact_type: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9._-]*$")
     location: str = Field(min_length=1)
     digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     size_bytes: int = Field(default=0, ge=0)
@@ -133,3 +133,27 @@ class BuildKitWorkerClient:
         response = await self._client.get(f"/v1/builds/{job_id}")
         response.raise_for_status()
         return WorkerBuildStatus.model_validate(response.json())
+
+    async def push_registry(
+        self,
+        job_id: str,
+        *,
+        reference: str,
+        credential_secret_name: str,
+    ) -> WorkerArtifact:
+        response = await self._client.post(
+            f"/v1/builds/{job_id}/registry",
+            json={
+                "reference": reference,
+                "credential_secret_name": credential_secret_name,
+            },
+        )
+        response.raise_for_status()
+        return WorkerArtifact.model_validate(response.json())
+
+    async def download_artifact(self, job_id: str, artifact_type: str) -> bytes:
+        response = await self._client.get(
+            f"/v1/builds/{job_id}/artifacts/{artifact_type}",
+        )
+        response.raise_for_status()
+        return response.content
