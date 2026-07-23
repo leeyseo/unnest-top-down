@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 from fastapi import BackgroundTasks, HTTPException, Request
 from langflow.api.v1.runtime import (
+    _apply_active_index_tweaks,
     _contract_input,
     _contract_output,
     _immutable_agent_flow,
@@ -18,6 +19,8 @@ from langflow.main import create_runtime_app
 from langflow.services.database.models.deployment_release import DeploymentRelease
 from langflow.services.database.models.flow.model import Flow, FlowRead
 from langflow.services.database.models.flow_version.model import FlowVersion
+from langflow.services.database.models.knowledge_base import KnowledgeBaseRecord
+from langflow.services.database.models.runtime_document import IndexGeneration
 from langflow.services.database.models.runtime_schedule import RuntimeSchedule
 from langflow.services.database.models.user.model import User
 from langflow.services.deps import get_settings_service
@@ -39,6 +42,7 @@ def test_runtime_profile_mounts_only_deployment_routes(monkeypatch):
     assert "/api/v1/files" in paths
     assert "/api/v1/files/{document_id}/download" in paths
     assert "/api/v1/ingestion/jobs/{job_id}" in paths
+    assert "/api/v1/ingestion/jobs/{job_id}/retry" in paths
     assert "/api/v1/admin/api-keys" in paths
     assert "/api/v1/admin/users" in paths
     assert "/api/v1/admin/users/{user_id}" in paths
@@ -130,6 +134,53 @@ async def test_runtime_bundles_release_pinned_subflow_snapshot(async_session):
 
     assert bundled[str(subflow.id)]["flow_version_id"] == str(subflow_version.id)
     assert bundled[str(subflow.id)]["data"] == {"nodes": [{"id": "released"}], "edges": []}
+
+
+async def test_runtime_retrieval_uses_active_physical_index(async_session):
+    user = User(username="runtime-index-owner", password="unused", is_active=True)  # noqa: S106
+    kb = KnowledgeBaseRecord(name="shared", user_id=user.id)
+    flow = Flow(
+        name="runtime-index-agent",
+        user_id=user.id,
+        data={
+            "nodes": [
+                {
+                    "id": "knowledge",
+                    "data": {"node": {"template": {"knowledge_base": {"value": "shared"}}}},
+                }
+            ],
+            "edges": [],
+        },
+    )
+    release = DeploymentRelease(
+        user_id=user.id,
+        version="1.0.0",
+        agent_flow_version_id=uuid4(),
+        ingestion_flow_version_id=uuid4(),
+        config={},
+        manifest={"knowledge_base_alias": "shared"},
+        api_version="v1",
+    )
+    generation = IndexGeneration(
+        knowledge_base_id=kb.id,
+        fingerprint="sha256:index",
+        status="active",
+        is_active=True,
+        backend_reference={"alias": "shared--physical"},
+    )
+    async_session.add_all([user, kb, flow, generation])
+    await async_session.flush()
+    request = SimplifiedAPIRequest(output_type="any", tweaks={})
+
+    await _apply_active_index_tweaks(
+        async_session,
+        release=release,
+        flow=FlowRead.model_validate(flow, from_attributes=True),
+        input_request=request,
+    )
+
+    assert request.tweaks is not None
+    assert request.tweaks.root["knowledge"] == {"knowledge_base": "shared--physical"}
 
 
 def test_runtime_applies_release_api_contract():

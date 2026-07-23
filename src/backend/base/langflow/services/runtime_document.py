@@ -130,6 +130,33 @@ async def activate_document_version(
     return version
 
 
+async def fail_document_version(
+    session: AsyncSession,
+    *,
+    document_id: UUID,
+    version_id: UUID,
+) -> None:
+    version = await session.get(DocumentVersion, version_id)
+    document = await session.get(RuntimeDocument, document_id)
+    if version is None or document is None or version.document_id != document.id:
+        return
+    version.status = "failed"
+    previous_active = (
+        await session.exec(
+            select(DocumentVersion).where(
+                DocumentVersion.document_id == document.id,
+                DocumentVersion.id != version.id,
+                DocumentVersion.status == "active",
+            )
+        )
+    ).first()
+    document.status = "active" if previous_active else "failed"
+    document.updated_at = datetime.now(timezone.utc)
+    session.add(version)
+    session.add(document)
+    await session.flush()
+
+
 async def move_document_to_trash(
     session: AsyncSession,
     *,
@@ -180,11 +207,32 @@ async def create_shadow_generation(
         )
     ).first()
     if existing is not None:
+        if existing.status in {"failed", "retired"}:
+            existing.status = "building"
+            existing.is_active = False
+            existing.backend_reference = {}
+            existing.activated_at = None
+            session.add(existing)
+            await session.flush()
+            return existing, True
         return existing, False
     generation = IndexGeneration(knowledge_base_id=knowledge_base_id, fingerprint=fingerprint)
     session.add(generation)
     await session.flush()
     return generation, True
+
+
+async def fail_index_generation(
+    session: AsyncSession,
+    *,
+    generation_id: UUID,
+) -> None:
+    generation = await session.get(IndexGeneration, generation_id)
+    if generation is None or generation.is_active:
+        return
+    generation.status = "failed"
+    session.add(generation)
+    await session.flush()
 
 
 async def activate_index_generation(

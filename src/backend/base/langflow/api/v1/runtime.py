@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import io
+import json
 import mimetypes
 import os
 import tempfile
@@ -36,6 +37,7 @@ from starlette.background import BackgroundTask
 from langflow.api.utils import CurrentActiveUser, DbSession, DbSessionReadOnly, build_content_disposition
 from langflow.api.v1.endpoints import _run_flow_internal, simple_run_flow
 from langflow.api.v1.schemas import ApiKeysResponse, RunResponse, SimplifiedAPIRequest
+from langflow.schema.graph import Tweaks
 from langflow.services.auth.utils import get_current_active_superuser
 from langflow.services.database.models.api_key.crud import create_api_key, delete_api_key, get_api_keys, hash_api_key
 from langflow.services.database.models.api_key.model import ApiKey, ApiKeyCreate, UnmaskedApiKeyRead
@@ -47,7 +49,7 @@ from langflow.services.database.models.knowledge_base import KnowledgeBaseRecord
 from langflow.services.database.models.message.model import MessageTable
 from langflow.services.database.models.runtime_audit import RuntimeAuditCheckpoint, RuntimeAuditEvent
 from langflow.services.database.models.runtime_configuration import RuntimeConfiguration
-from langflow.services.database.models.runtime_document import DocumentVersion, RuntimeDocument
+from langflow.services.database.models.runtime_document import DocumentVersion, IndexGeneration, RuntimeDocument
 from langflow.services.database.models.runtime_schedule import RuntimeSchedule
 from langflow.services.database.models.user.model import User
 from langflow.services.deployment import SandboxWorkerClient
@@ -68,6 +70,10 @@ from langflow.services.runtime_audit import (
 from langflow.services.runtime_document import (
     DuplicateStrategy,
     activate_document_version,
+    activate_index_generation,
+    create_shadow_generation,
+    fail_document_version,
+    fail_index_generation,
     move_document_to_trash,
     register_document,
     restore_document,
@@ -523,6 +529,76 @@ def _deployment_file_input_id(data: dict) -> str:
     return matches[0]
 
 
+def _knowledge_component_ids(data: dict[str, Any]) -> list[str]:
+    matches = []
+    for node in data.get("nodes", []):
+        if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+            continue
+        template = node.get("data", {}).get("node", {}).get("template", {})
+        if isinstance(template, dict) and "knowledge_base" in template:
+            matches.append(node["id"])
+    return matches
+
+
+def _release_index_fingerprint(release: DeploymentRelease) -> str:
+    flows = release.manifest.get("flows", [])
+    ingestion = next(
+        (entry for entry in flows if isinstance(entry, dict) and entry.get("role") == "ingestion"),
+        {},
+    )
+    payload = {
+        "ingestion_digest": ingestion.get("digest"),
+        "knowledge_base_alias": release.manifest.get("knowledge_base_alias"),
+        "services": release.manifest.get("services", []),
+    }
+    return f"sha256:{hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()}"
+
+
+async def _run_ingestion_target(
+    *,
+    immutable: FlowRead,
+    ingestion_data: dict[str, Any],
+    subflows: dict[str, dict[str, Any]],
+    release_id: UUID,
+    user: User,
+    document: RuntimeDocument,
+    version: DocumentVersion,
+    physical_alias: str,
+) -> None:
+    storage_service = get_storage_service()
+    namespace, storage_name = version.storage_path.split("/", 1)
+    component_path = storage_service.resolve_component_path(version.storage_path)
+    temporary_directory: tempfile.TemporaryDirectory | None = None
+    try:
+        if not Path(component_path).is_absolute():
+            temporary_directory = tempfile.TemporaryDirectory(prefix="unnest-ingestion-")
+            component_path = str(Path(temporary_directory.name) / storage_name)
+            await AsyncPath(component_path).write_bytes(await storage_service.get_file(namespace, storage_name))
+        tweaks = {
+            _deployment_file_input_id(ingestion_data): {
+                "file_path": component_path,
+                "document_id": str(document.id),
+                "checksum": version.checksum,
+                "mime_type": version.mime_type,
+                "metadata": version.document_metadata,
+            }
+        }
+        for component_id in _knowledge_component_ids(ingestion_data):
+            tweaks.setdefault(component_id, {})["knowledge_base"] = physical_alias
+        await simple_run_flow(
+            flow=immutable,
+            input_request=SimplifiedAPIRequest(output_type="any", tweaks=tweaks),
+            api_key_user=user,
+            context={
+                "deployment_release_id": str(release_id),
+                "deployment_subflows": subflows,
+            },
+        )
+    finally:
+        if temporary_directory is not None:
+            await asyncio.to_thread(temporary_directory.cleanup)
+
+
 async def _execute_runtime_ingestion(
     *,
     release_id: UUID,
@@ -533,7 +609,7 @@ async def _execute_runtime_ingestion(
 ) -> None:
     job_service = get_job_service()
     await job_service.update_job_metadata(job_id, {"stage": "loading", "progress": 10})
-    temporary_directory: tempfile.TemporaryDirectory | None = None
+    generation_id: UUID | None = None
     try:
         async with session_scope() as session:
             release = await session.get(DeploymentRelease, release_id)
@@ -551,58 +627,119 @@ async def _execute_runtime_ingestion(
                 msg = "Immutable Ingestion Flow Version is invalid"
                 raise TypeError(msg)
 
-            storage_service = get_storage_service()
-            namespace, storage_name = version.storage_path.split("/", 1)
-            component_path = storage_service.resolve_component_path(version.storage_path)
-            if not Path(component_path).is_absolute():
-                temporary_directory = tempfile.TemporaryDirectory(prefix="unnest-ingestion-")
-                component_path = str(Path(temporary_directory.name) / storage_name)
-                await AsyncPath(component_path).write_bytes(await storage_service.get_file(namespace, storage_name))
-
-            input_id = _deployment_file_input_id(ingestion_version.data)
             immutable = FlowRead.model_validate(flow, from_attributes=True).model_copy(
                 update={"data": copy.deepcopy(ingestion_version.data)}
             )
             subflows = await _immutable_subflows(session, release)
-            request = SimplifiedAPIRequest(
-                output_type="any",
-                tweaks={
-                    input_id: {
-                        "file_path": component_path,
-                        "document_id": str(document.id),
-                        "checksum": version.checksum,
-                        "mime_type": version.mime_type,
-                        "metadata": version.document_metadata,
-                    }
+            fingerprint = _release_index_fingerprint(release)
+            generation, reset_generation = await create_shadow_generation(
+                session,
+                knowledge_base_id=document.knowledge_base_id,
+                fingerprint=fingerprint,
+            )
+            generation_id = generation.id
+            active_generation = (
+                await session.exec(
+                    select(IndexGeneration).where(
+                        IndexGeneration.knowledge_base_id == document.knowledge_base_id,
+                        IndexGeneration.is_active.is_(True),
+                    )
+                )
+            ).first()
+            physical_alias = generation.backend_reference.get("alias")
+            if not isinstance(physical_alias, str) or not physical_alias:
+                logical_alias = str(release.manifest.get("knowledge_base_alias") or "knowledge")
+                physical_alias = f"{logical_alias}--{fingerprint[7:15]}-{uuid4().hex[:8]}"
+                generation.backend_reference = {
+                    "alias": physical_alias,
+                    "logical_alias": logical_alias,
+                    "job_id": str(job_id),
+                }
+                session.add(generation)
+                await session.flush()
+
+            targets: list[tuple[RuntimeDocument, DocumentVersion]] = []
+            if (
+                reset_generation
+                and active_generation is not None
+                and active_generation.id != generation.id
+            ):
+                targets = list(
+                    (
+                        await session.exec(
+                            select(RuntimeDocument, DocumentVersion)
+                            .join(
+                                DocumentVersion,
+                                DocumentVersion.document_id == RuntimeDocument.id,
+                            )
+                            .where(
+                                RuntimeDocument.knowledge_base_id == document.knowledge_base_id,
+                                RuntimeDocument.id != document.id,
+                                RuntimeDocument.status == "active",
+                                DocumentVersion.status == "active",
+                            )
+                            .order_by(col(RuntimeDocument.created_at))
+                        )
+                    ).all()
+                )
+            targets.append((document, version))
+            ingestion_data = copy.deepcopy(ingestion_version.data)
+            activate_generation_after = not generation.is_active
+
+        total = len(targets)
+        for index, (target_document, target_version) in enumerate(targets, start=1):
+            await job_service.update_job_metadata(
+                job_id,
+                {
+                    "stage": "reindexing" if total > 1 else "ingesting",
+                    "progress": 10 + round(80 * (index - 1) / total),
+                    "item": index,
+                    "items": total,
+                    "index_generation_id": str(generation_id),
                 },
             )
-        await job_service.update_job_metadata(job_id, {"stage": "ingesting", "progress": 50})
-        await simple_run_flow(
-            flow=immutable,
-            input_request=request,
-            api_key_user=user,
-            context={
-                "deployment_release_id": str(release_id),
-                "deployment_subflows": subflows,
-            },
-        )
+            await _run_ingestion_target(
+                immutable=immutable,
+                ingestion_data=ingestion_data,
+                subflows=subflows,
+                release_id=release_id,
+                user=user,
+                document=target_document,
+                version=target_version,
+                physical_alias=physical_alias,
+            )
         async with session_scope() as session:
+            job = await session.get(Job, job_id)
+            if job is not None and job.status == JobStatus.CANCELLED:
+                cancellation_code = "LANGFLOW_USER_CANCELLED"
+                raise asyncio.CancelledError(cancellation_code)
             await activate_document_version(session, document_id=document_id, version_id=version_id)
+            if activate_generation_after:
+                generation = await session.get(IndexGeneration, generation_id)
+                if generation is None:
+                    msg = "Runtime index generation is unavailable"
+                    raise RuntimeError(msg)
+                await activate_index_generation(
+                    session,
+                    generation=generation,
+                    backend_reference={
+                        "alias": physical_alias,
+                        "logical_alias": release.manifest.get("knowledge_base_alias"),
+                    },
+                )
         await job_service.update_job_metadata(job_id, {"stage": "completed", "progress": 100})
+    except asyncio.CancelledError:
+        async with session_scope() as session:
+            await fail_document_version(session, document_id=document_id, version_id=version_id)
+            if generation_id is not None:
+                await fail_index_generation(session, generation_id=generation_id)
+        raise
     except Exception:
         async with session_scope() as session:
-            document = await session.get(RuntimeDocument, document_id)
-            version = await session.get(DocumentVersion, version_id)
-            if document is not None:
-                document.status = "failed"
-                session.add(document)
-            if version is not None:
-                version.status = "failed"
-                session.add(version)
+            await fail_document_version(session, document_id=document_id, version_id=version_id)
+            if generation_id is not None:
+                await fail_index_generation(session, generation_id=generation_id)
         raise
-    finally:
-        if temporary_directory is not None:
-            await asyncio.to_thread(temporary_directory.cleanup)
 
 
 async def _schedule_runtime_ingestion(
@@ -663,6 +800,45 @@ def _contract_input(release: DeploymentRelease, payload: dict[str, Any]) -> Simp
             )
         tweaks.setdefault(component_id, {})[component_field] = payload[field_name]
     return SimplifiedAPIRequest(output_type="any", tweaks=tweaks)
+
+
+async def _apply_active_index_tweaks(
+    session: DbSessionReadOnly,
+    *,
+    release: DeploymentRelease,
+    flow: FlowRead,
+    input_request: SimplifiedAPIRequest,
+) -> None:
+    alias = release.manifest.get("knowledge_base_alias")
+    if not isinstance(alias, str) or not isinstance(flow.data, dict):
+        return
+    knowledge_base = (
+        await session.exec(
+            select(KnowledgeBaseRecord).where(
+                KnowledgeBaseRecord.user_id == release.user_id,
+                KnowledgeBaseRecord.name == alias,
+            )
+        )
+    ).first()
+    if knowledge_base is None:
+        return
+    generation = (
+        await session.exec(
+            select(IndexGeneration).where(
+                IndexGeneration.knowledge_base_id == knowledge_base.id,
+                IndexGeneration.is_active.is_(True),
+            )
+        )
+    ).first()
+    physical_alias = generation.backend_reference.get("alias") if generation else None
+    if not isinstance(physical_alias, str) or not physical_alias:
+        return
+    tweaks = input_request.tweaks.root if input_request.tweaks is not None else {}
+    for component_id in _knowledge_component_ids(flow.data):
+        value = tweaks.setdefault(component_id, {})
+        if isinstance(value, dict):
+            value["knowledge_base"] = physical_alias
+    input_request.tweaks = Tweaks(root=tweaks)
 
 
 def _mapped_result(result: dict[str, Any], component_id: str, path: str) -> Any:
@@ -794,6 +970,12 @@ async def _run_agent(
     release, flow = await _immutable_agent_flow(session, api_version)
     subflows = await _immutable_subflows(session, release)
     input_request = _contract_input(release, payload)
+    await _apply_active_index_tweaks(
+        session,
+        release=release,
+        flow=flow,
+        input_request=input_request,
+    )
     try:
         if release.manifest.get("sandbox", {}).get("required") is True:
             result = await _run_in_sandbox(
@@ -1631,6 +1813,102 @@ async def get_runtime_ingestion_job(
     )
 
 
+@router.post("/api/v1/ingestion/jobs/{job_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_runtime_ingestion_job(
+    job_id: UUID,
+    background_tasks: BackgroundTasks,
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> RuntimeIngestionJobRead:
+    previous = await session.get(Job, job_id)
+    if previous is None or previous.asset_type != "runtime_document":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ingestion job not found")
+    if previous.status not in {JobStatus.FAILED, JobStatus.CANCELLED, JobStatus.TIMED_OUT}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ingestion job is not retryable")
+    metadata = previous.job_metadata or {}
+    try:
+        document_id = UUID(str(metadata["document_id"]))
+        version_id = UUID(str(metadata["version_id"]))
+        release_id = UUID(str(metadata["release_id"]))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Ingestion retry metadata is unavailable",
+        ) from exc
+    in_flight = (
+        await session.exec(
+            select(Job.job_id).where(
+                Job.asset_id == document_id,
+                col(Job.status).in_([JobStatus.QUEUED, JobStatus.IN_PROGRESS]),
+            )
+        )
+    ).first()
+    if in_flight:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Document ingestion is already running")
+    release = await session.get(DeploymentRelease, release_id)
+    document = await session.get(RuntimeDocument, document_id)
+    version = await session.get(DocumentVersion, version_id)
+    ingestion_version = (
+        await session.get(FlowVersion, release.ingestion_flow_version_id) if release is not None else None
+    )
+    if (
+        release is None
+        or document is None
+        or version is None
+        or version.document_id != document.id
+        or ingestion_version is None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Immutable ingestion retry state is unavailable",
+        )
+    document.status = "pending"
+    version.status = "pending"
+    session.add(document)
+    session.add(version)
+    retry_job = Job(
+        job_id=uuid4(),
+        flow_id=ingestion_version.flow_id,
+        status=JobStatus.QUEUED,
+        type=JobType.INGESTION,
+        user_id=release.user_id,
+        asset_id=document.id,
+        asset_type="runtime_document",
+        job_metadata={
+            "stage": "queued",
+            "progress": 0,
+            "document_id": str(document.id),
+            "version_id": str(version.id),
+            "release_id": str(release.id),
+            "retry_of": str(previous.job_id),
+        },
+    )
+    session.add(retry_job)
+    await session.flush()
+    background_tasks.add_task(
+        _schedule_runtime_ingestion,
+        release_id=release.id,
+        document_id=document.id,
+        version_id=version.id,
+        user_id=release.user_id,
+        job_id=retry_job.job_id,
+    )
+    await append_runtime_audit_event(
+        session,
+        event_type="ingestion.retried",
+        actor_user_id=admin.id,
+        resource_type="ingestion_job",
+        resource_id=str(retry_job.job_id),
+        details={"retry_of": str(previous.job_id), "document_id": str(document.id)},
+    )
+    return RuntimeIngestionJobRead(
+        id=retry_job.job_id,
+        status=retry_job.status.value,
+        document_id=retry_job.asset_id,
+        metadata=retry_job.job_metadata or {},
+    )
+
+
 @router.post("/api/v1/ingestion/jobs/{job_id}/cancel", status_code=status.HTTP_202_ACCEPTED)
 async def cancel_runtime_ingestion_job(
     job_id: UUID,
@@ -1644,7 +1922,23 @@ async def cancel_runtime_ingestion_job(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Ingestion job is not cancellable")
     await get_task_service().revoke_task((job.job_metadata or {}).get("task_id", job_id))
     job.status = JobStatus.CANCELLED
+    job.finished_timestamp = datetime.now(timezone.utc)
+    job.job_metadata = {**(job.job_metadata or {}), "stage": "cancelled"}
     session.add(job)
+    metadata = job.job_metadata or {}
+    try:
+        await fail_document_version(
+            session,
+            document_id=UUID(str(metadata["document_id"])),
+            version_id=UUID(str(metadata["version_id"])),
+        )
+        if metadata.get("index_generation_id"):
+            await fail_index_generation(
+                session,
+                generation_id=UUID(str(metadata["index_generation_id"])),
+            )
+    except (KeyError, ValueError):
+        pass
     await session.flush()
     await append_runtime_audit_event(
         session,

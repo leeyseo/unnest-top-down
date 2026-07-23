@@ -3,10 +3,16 @@ import zipfile
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException, UploadFile
-from langflow.api.v1.runtime import _scan_with_clamav, _validated_upload, upload_runtime_document
+from langflow.api.v1.runtime import (
+    _scan_with_clamav,
+    _validated_upload,
+    retry_runtime_ingestion_job,
+    upload_runtime_document,
+)
 from langflow.services.database.models.deployment_release import DeploymentRelease
 from langflow.services.database.models.flow.model import Flow
 from langflow.services.database.models.flow_version.model import FlowVersion
+from langflow.services.database.models.jobs.model import Job, JobStatus
 from langflow.services.database.models.knowledge_base import KnowledgeBaseRecord
 from langflow.services.database.models.user.model import User
 
@@ -128,3 +134,17 @@ async def test_runtime_upload_saves_once_and_queues_ingestion(async_session, mon
     assert duplicate.created is False
     assert duplicate.job_id is None
     assert len(storage.saved) == 1
+
+    failed_job = await async_session.get(Job, first.job_id)
+    assert failed_job is not None
+    failed_job.status = JobStatus.FAILED
+    async_session.add(failed_job)
+    await async_session.flush()
+    retried = await retry_runtime_ingestion_job(
+        job_id=failed_job.job_id,
+        background_tasks=BackgroundTasks(),
+        session=async_session,
+        admin=owner,
+    )
+    assert retried.status == JobStatus.QUEUED.value
+    assert retried.metadata["retry_of"] == str(failed_job.job_id)
