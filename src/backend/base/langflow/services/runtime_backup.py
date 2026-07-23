@@ -11,16 +11,20 @@ import sqlite3
 import subprocess
 import tarfile
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from sqlalchemy.engine import make_url
 
 from langflow.services.database.service import get_sqlite_database_file_path
 from langflow.services.runtime_setup import decrypt_runtime_backup, encrypt_runtime_backup
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 BACKUP_FORMAT_VERSION = 1
 MAX_BACKUP_ENTRIES = 100_000
@@ -45,6 +49,12 @@ class RuntimeBackupResult:
     checksum: str
     size_bytes: int
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class RuntimeRestoreResult:
+    backup_id: str
+    release_version: str
 
 
 def runtime_backup_directory() -> Path:
@@ -212,7 +222,11 @@ def create_runtime_backup(
             entries.append(_add_bytes(archive, "secrets/master.key", master_key.read_bytes()))
             entries.extend(_add_bytes(archive, item.archive_path, item.contents) for item in files)
             entries.extend(
-                _add_bytes(archive, f"license/{license_path.name}", license_path.read_bytes())
+                _add_bytes(
+                    archive,
+                    f"{'keys' if license_path.suffix == '.pub' else 'license'}/{license_path.name}",
+                    license_path.read_bytes(),
+                )
                 for license_path in license_files or []
                 if license_path.is_file() and not license_path.is_symlink()
             )
@@ -242,7 +256,8 @@ def create_runtime_backup(
     )
 
 
-def verify_runtime_backup(path: Path, identity: str) -> dict[str, Any]:
+@contextmanager
+def _decrypted_backup(path: Path, identity: str) -> Iterator[Path]:
     if not path.is_file() or path.is_symlink():
         msg = "Runtime backup is unavailable"
         raise RuntimeBackupError(msg)
@@ -252,64 +267,332 @@ def verify_runtime_backup(path: Path, identity: str) -> dict[str, Any]:
     temporary_path.unlink()
     try:
         decrypt_runtime_backup(path, temporary_path, identity)
-        with tarfile.open(temporary_path, mode="r:") as archive:
-            members = archive.getmembers()
-            if len(members) > MAX_BACKUP_ENTRIES:
-                msg = "Runtime backup contains too many entries"
-                raise RuntimeBackupError(msg)
-            by_name: dict[str, tarfile.TarInfo] = {}
-            for member in members:
-                safe_name = _archive_path(member.name)
-                if not member.isfile() or safe_name in by_name:
-                    msg = "Runtime backup contains an unsafe or duplicate entry"
-                    raise RuntimeBackupError(msg)
-                by_name[safe_name] = member
-            manifest_member = by_name.get("manifest.json")
-            if manifest_member is None or manifest_member.size > MAX_MANIFEST_BYTES:
-                msg = "Runtime backup manifest is unavailable"
-                raise RuntimeBackupError(msg)
-            extracted_manifest = archive.extractfile(manifest_member)
-            if extracted_manifest is None:
-                msg = "Runtime backup manifest is unavailable"
-                raise RuntimeBackupError(msg)
-            manifest: Any = json.load(extracted_manifest)
-            if (
-                not isinstance(manifest, dict)
-                or manifest.get("format") != "unnest-runtime-backup"
-                or manifest.get("format_version") != BACKUP_FORMAT_VERSION
-            ):
-                msg = "Runtime backup manifest is invalid"
-                raise RuntimeBackupError(msg)
-            entries = manifest.get("entries")
-            if not isinstance(entries, list):
-                msg = "Runtime backup entry manifest is invalid"
-                raise RuntimeBackupError(msg)
-            for entry in entries:
-                if not isinstance(entry, dict):
-                    msg = "Runtime backup entry manifest is invalid"
-                    raise RuntimeBackupError(msg)
-                name = _archive_path(str(entry.get("path", "")))
-                member = by_name.get(name)
-                extracted = archive.extractfile(member) if member is not None else None
-                if extracted is None:
-                    msg = f"Runtime backup entry is missing: {name}"
-                    raise RuntimeBackupError(msg)
-                digest = hashlib.sha256()
-                size = 0
-                while chunk := extracted.read(1024 * 1024):
-                    size += len(chunk)
-                    digest.update(chunk)
-                if size != entry.get("size_bytes") or digest.hexdigest() != entry.get("sha256"):
-                    msg = f"Runtime backup entry integrity check failed: {name}"
-                    raise RuntimeBackupError(msg)
-            if "database.dump" not in by_name or "secrets/master.key" not in by_name:
-                msg = "Runtime backup does not contain the required recovery state"
-                raise RuntimeBackupError(msg)
-            return manifest
-    except (tarfile.TarError, json.JSONDecodeError, ValueError) as exc:
-        if isinstance(exc, RuntimeBackupError):
-            raise
+        yield temporary_path
+    except ValueError as exc:
         msg = "Runtime backup could not be decrypted or verified"
         raise RuntimeBackupError(msg) from exc
     finally:
         temporary_path.unlink(missing_ok=True)
+
+
+def _verify_open_archive(archive: tarfile.TarFile) -> tuple[dict[str, Any], dict[str, tarfile.TarInfo]]:
+    members = archive.getmembers()
+    if len(members) > MAX_BACKUP_ENTRIES:
+        msg = "Runtime backup contains too many entries"
+        raise RuntimeBackupError(msg)
+    by_name: dict[str, tarfile.TarInfo] = {}
+    for member in members:
+        safe_name = _archive_path(member.name)
+        if not member.isfile() or safe_name in by_name:
+            msg = "Runtime backup contains an unsafe or duplicate entry"
+            raise RuntimeBackupError(msg)
+        by_name[safe_name] = member
+    manifest_member = by_name.get("manifest.json")
+    if manifest_member is None or manifest_member.size > MAX_MANIFEST_BYTES:
+        msg = "Runtime backup manifest is unavailable"
+        raise RuntimeBackupError(msg)
+    extracted_manifest = archive.extractfile(manifest_member)
+    if extracted_manifest is None:
+        msg = "Runtime backup manifest is unavailable"
+        raise RuntimeBackupError(msg)
+    manifest: Any = json.load(extracted_manifest)
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("format") != "unnest-runtime-backup"
+        or manifest.get("format_version") != BACKUP_FORMAT_VERSION
+    ):
+        msg = "Runtime backup manifest is invalid"
+        raise RuntimeBackupError(msg)
+    entries = manifest.get("entries")
+    if not isinstance(entries, list):
+        msg = "Runtime backup entry manifest is invalid"
+        raise RuntimeBackupError(msg)
+    for entry in entries:
+        if not isinstance(entry, dict):
+            msg = "Runtime backup entry manifest is invalid"
+            raise RuntimeBackupError(msg)
+        name = _archive_path(str(entry.get("path", "")))
+        member = by_name.get(name)
+        extracted = archive.extractfile(member) if member is not None else None
+        if extracted is None:
+            msg = f"Runtime backup entry is missing: {name}"
+            raise RuntimeBackupError(msg)
+        digest = hashlib.sha256()
+        size = 0
+        while chunk := extracted.read(1024 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+        if size != entry.get("size_bytes") or digest.hexdigest() != entry.get("sha256"):
+            msg = f"Runtime backup entry integrity check failed: {name}"
+            raise RuntimeBackupError(msg)
+    if "database.dump" not in by_name or "secrets/master.key" not in by_name:
+        msg = "Runtime backup does not contain the required recovery state"
+        raise RuntimeBackupError(msg)
+    return manifest, by_name
+
+
+def verify_runtime_backup(path: Path, identity: str) -> dict[str, Any]:
+    try:
+        with _decrypted_backup(path, identity) as temporary_path, tarfile.open(
+            temporary_path, mode="r:"
+        ) as archive:
+            manifest, _members = _verify_open_archive(archive)
+            return manifest
+    except (tarfile.TarError, json.JSONDecodeError, ValueError) as exc:
+        msg = "Runtime backup could not be decrypted or verified"
+        raise RuntimeBackupError(msg) from exc
+
+
+def extract_runtime_backup(path: Path, identity: str, destination: Path) -> dict[str, Any]:
+    if destination.exists() or destination.is_symlink():
+        msg = "Runtime backup extraction destination already exists"
+        raise RuntimeBackupError(msg)
+    destination.mkdir(mode=0o700, parents=False)
+    try:
+        with _decrypted_backup(path, identity) as temporary_path, tarfile.open(
+            temporary_path, mode="r:"
+        ) as archive:
+            manifest, members = _verify_open_archive(archive)
+            for name, member in members.items():
+                source = archive.extractfile(member)
+                if source is None:
+                    msg = "Runtime backup manifest is unavailable"
+                    raise RuntimeBackupError(msg)
+                target = destination.joinpath(*PurePosixPath(name).parts)
+                target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, "wb") as target_file:
+                    shutil.copyfileobj(source, target_file, length=1024 * 1024)
+            return manifest
+    except (tarfile.TarError, json.JSONDecodeError, ValueError) as exc:
+        shutil.rmtree(destination)
+        msg = "Runtime backup could not be decrypted or verified"
+        raise RuntimeBackupError(msg) from exc
+    except Exception:
+        shutil.rmtree(destination)
+        raise
+
+
+def _copy_restore_tree(
+    source: Path,
+    destination: Path,
+    rollback: Path,
+    replaced: list[Path],
+    created: list[Path],
+) -> None:
+    if not source.exists():
+        return
+    for source_file in source.rglob("*"):
+        if not source_file.is_file() or source_file.is_symlink():
+            continue
+        relative = source_file.relative_to(source)
+        target = destination / relative
+        if target.exists():
+            if not target.is_file() or target.is_symlink():
+                msg = f"Restore target is unsafe: {target}"
+                raise RuntimeBackupError(msg)
+            rollback_target = rollback / relative
+            rollback_target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            shutil.copy2(target, rollback_target)
+            replaced.append(target)
+        else:
+            created.append(target)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temporary_target = target.with_name(f".{target.name}.unnest-restore-{uuid4()}")
+        try:
+            shutil.copy2(source_file, temporary_target)
+            temporary_target.chmod(0o600)
+            temporary_target.replace(target)
+        finally:
+            temporary_target.unlink(missing_ok=True)
+
+
+def _rollback_restore_tree(
+    destination: Path,
+    rollback: Path,
+    replaced: list[Path],
+    created: list[Path],
+) -> None:
+    for target in created:
+        target.unlink(missing_ok=True)
+    for target in replaced:
+        rollback_source = rollback / target.relative_to(destination)
+        if rollback_source.is_file():
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            shutil.copy2(rollback_source, target)
+
+
+def _restore_database(database_url: str, database_format: str, dump: Path, rollback: Path) -> None:
+    sqlite_path = get_sqlite_database_file_path(database_url)
+    if sqlite_path is not None:
+        if database_format != "sqlite3":
+            msg = "Backup database format does not match the SQLite target"
+            raise RuntimeBackupError(msg)
+        with sqlite3.connect(dump) as connection:
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()
+        if not integrity or integrity[0] != "ok":
+            msg = "Backup SQLite database integrity check failed"
+            raise RuntimeBackupError(msg)
+        sqlite_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if sqlite_path.exists():
+            shutil.copy2(sqlite_path, rollback / "database.db")
+        temporary_database = sqlite_path.with_name(f".{sqlite_path.name}.unnest-restore-{uuid4()}")
+        shutil.copy2(dump, temporary_database)
+        temporary_database.chmod(0o600)
+        temporary_database.replace(sqlite_path)
+        return
+
+    url = make_url(database_url)
+    if not url.drivername.startswith(("postgresql", "postgres")) or database_format != "postgresql-custom":
+        msg = "Backup database format does not match the PostgreSQL target"
+        raise RuntimeBackupError(msg)
+    pg_restore = shutil.which("pg_restore")
+    if pg_restore is None:
+        msg = "PostgreSQL restore tooling is unavailable"
+        raise RuntimeBackupError(msg)
+    command_url = url.set(drivername="postgresql", password=None).render_as_string(hide_password=False)
+    environment = os.environ.copy()
+    if url.password:
+        environment["PGPASSWORD"] = url.password
+    try:
+        completed = subprocess.run(  # noqa: S603
+            [
+                pg_restore,
+                "--clean",
+                "--if-exists",
+                "--no-owner",
+                "--no-privileges",
+                "--single-transaction",
+                "--dbname",
+                command_url,
+                str(dump),
+            ],
+            env=environment,
+            check=False,
+            capture_output=True,
+            timeout=int(os.getenv("UNNEST_RESTORE_TIMEOUT_SECONDS", "3600")),
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        msg = "PostgreSQL restore tooling is unavailable or timed out"
+        raise RuntimeBackupError(msg) from exc
+    if completed.returncode:
+        msg = "PostgreSQL restore failed; its transaction was rolled back"
+        raise RuntimeBackupError(msg)
+
+
+def restore_runtime_backup(
+    *,
+    path: Path,
+    identity: str,
+    database_url: str,
+    storage_directory: Path,
+    master_key_destination: Path,
+    license_directory: Path | None = None,
+    key_directory: Path | None = None,
+) -> RuntimeRestoreResult:
+    for target in (storage_directory, master_key_destination.parent):
+        if not target.is_absolute() or target.is_symlink():
+            msg = "Runtime restore targets must be absolute, non-symbolic paths"
+            raise RuntimeBackupError(msg)
+    if master_key_destination.is_symlink():
+        msg = "Runtime master key restore target must not be a symbolic link"
+        raise RuntimeBackupError(msg)
+    rollback_root = runtime_backup_directory() / "restore-rollbacks"
+    rollback_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="unnest-restore-") as temporary:
+        extracted = Path(temporary) / "extracted"
+        manifest = extract_runtime_backup(path, identity, extracted)
+        rollback = rollback_root / f"{manifest['backup_id']}-{uuid4()}"
+        rollback.mkdir(mode=0o700)
+        storage_rollback = rollback / "storage"
+        master_key_rollback = rollback / "secrets"
+        license_rollback = rollback / "license"
+        storage_replaced: list[Path] = []
+        storage_created: list[Path] = []
+        license_replaced: list[Path] = []
+        license_created: list[Path] = []
+        key_replaced: list[Path] = []
+        key_created: list[Path] = []
+        master_key_existed = master_key_destination.is_file()
+        try:
+            _copy_restore_tree(
+                extracted / "storage",
+                storage_directory,
+                storage_rollback,
+                storage_replaced,
+                storage_created,
+            )
+            if license_directory is not None:
+                if not license_directory.is_absolute() or license_directory.is_symlink():
+                    msg = "Runtime license restore target must be an absolute, non-symbolic path"
+                    raise RuntimeBackupError(msg)
+                _copy_restore_tree(
+                    extracted / "license",
+                    license_directory,
+                    license_rollback,
+                    license_replaced,
+                    license_created,
+                )
+            if key_directory is not None:
+                if not key_directory.is_absolute() or key_directory.is_symlink():
+                    msg = "Runtime key restore target must be an absolute, non-symbolic path"
+                    raise RuntimeBackupError(msg)
+                _copy_restore_tree(
+                    extracted / "keys",
+                    key_directory,
+                    rollback / "keys",
+                    key_replaced,
+                    key_created,
+                )
+            if master_key_existed:
+                master_key_rollback.mkdir(mode=0o700, parents=True, exist_ok=True)
+                shutil.copy2(master_key_destination, master_key_rollback / "master.key")
+            master_key_destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            temporary_key = master_key_destination.with_name(
+                f".{master_key_destination.name}.unnest-restore-{uuid4()}"
+            )
+            shutil.copy2(extracted / "secrets/master.key", temporary_key)
+            temporary_key.chmod(0o600)
+            temporary_key.replace(master_key_destination)
+            _restore_database(
+                database_url,
+                str(manifest["database_format"]),
+                extracted / "database.dump",
+                rollback,
+            )
+        except Exception:
+            try:
+                _rollback_restore_tree(
+                    storage_directory,
+                    storage_rollback,
+                    storage_replaced,
+                    storage_created,
+                )
+                if license_directory is not None:
+                    _rollback_restore_tree(
+                        license_directory,
+                        license_rollback,
+                        license_replaced,
+                        license_created,
+                    )
+                if key_directory is not None:
+                    _rollback_restore_tree(
+                        key_directory,
+                        rollback / "keys",
+                        key_replaced,
+                        key_created,
+                    )
+                if master_key_existed:
+                    shutil.copy2(master_key_rollback / "master.key", master_key_destination)
+                else:
+                    master_key_destination.unlink(missing_ok=True)
+            except Exception as rollback_error:
+                msg = f"Runtime restore and automatic rollback failed; recovery state remains at {rollback}"
+                raise RuntimeBackupError(msg) from rollback_error
+            shutil.rmtree(rollback)
+            raise
+        shutil.rmtree(rollback)
+    return RuntimeRestoreResult(
+        backup_id=str(manifest["backup_id"]),
+        release_version=str(manifest["release_version"]),
+    )

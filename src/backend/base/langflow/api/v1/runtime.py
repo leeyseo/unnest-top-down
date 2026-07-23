@@ -1552,7 +1552,10 @@ async def _runtime_backup_files(session: DbSessionReadOnly) -> list[RuntimeBacku
         return []
     storage = get_storage_service()
     files = []
+    included_paths: set[str] = set()
     for version in versions:
+        if version.storage_path in included_paths:
+            continue
         try:
             namespace, storage_name = version.storage_path.split("/", 1)
             contents = await storage.get_file(namespace, storage_name)
@@ -1563,10 +1566,11 @@ async def _runtime_backup_files(session: DbSessionReadOnly) -> list[RuntimeBacku
             ) from exc
         files.append(
             RuntimeBackupFile(
-                archive_path=f"documents/{version.id}/raw",
+                archive_path=f"storage/{namespace}/{storage_name}",
                 contents=contents,
             )
         )
+        included_paths.add(version.storage_path)
     return files
 
 

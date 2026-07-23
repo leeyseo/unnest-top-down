@@ -1,12 +1,16 @@
 import base64
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from langflow.unnestctl import PackageValidationError, preflight, verify_package
+from langflow.services.runtime_backup import RuntimeBackupFile, create_runtime_backup
+from langflow.services.runtime_setup import generate_age_recovery_key
+from langflow.unnestctl import PackageValidationError, app, preflight, verify_package
+from typer.testing import CliRunner
 
 
 def _write_signed_package(root: Path) -> Path:
@@ -96,3 +100,66 @@ def test_preflight_rejects_non_linux_host(tmp_path, monkeypatch):
 
     with pytest.raises(PackageValidationError, match="Only Linux"):
         preflight(package)
+
+
+def test_restore_command_requires_stopped_runtime_and_restores_offline_state(tmp_path, monkeypatch):
+    monkeypatch.setattr("langflow.unnestctl.platform.system", lambda: "Linux")
+    monkeypatch.setenv("UNNEST_BACKUP_DIR", str(tmp_path / "backups"))
+    source_database = tmp_path / "source.db"
+    with sqlite3.connect(source_database) as connection:
+        connection.execute("CREATE TABLE state (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO state VALUES ('restored')")
+    source_key = tmp_path / "source.key"
+    source_key.write_bytes(b"restored-key")
+    identity, recipient = generate_age_recovery_key()
+    backup = create_runtime_backup(
+        database_url=f"sqlite:///{source_database}",
+        recipient=recipient,
+        master_key=source_key,
+        files=[
+            RuntimeBackupFile(
+                archive_path="storage/runtime-documents/file.txt",
+                contents=b"restored file",
+            )
+        ],
+        release_version="1.0.0",
+    )
+    identity_file = tmp_path / "recovery.txt"
+    identity_file.write_text(identity)
+    identity_file.chmod(0o600)
+    target_database = tmp_path / "target.db"
+    with sqlite3.connect(target_database) as connection:
+        connection.execute("CREATE TABLE state (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO state VALUES ('old')")
+    storage = tmp_path / "storage"
+    target_key = tmp_path / "secrets/master.key"
+    runner = CliRunner()
+    arguments = [
+        "restore",
+        str(backup.path),
+        "--identity",
+        str(identity_file),
+        "--database-url",
+        f"sqlite:///{target_database}",
+        "--storage-dir",
+        str(storage),
+        "--master-key",
+        str(target_key),
+        "--license-dir",
+        str(tmp_path / "license"),
+        "--key-dir",
+        str(tmp_path / "keys"),
+        "--yes",
+    ]
+
+    stopped_required = runner.invoke(app, arguments)
+    restored = runner.invoke(app, [*arguments, "--runtime-stopped"])
+
+    assert stopped_required.exit_code == 1
+    assert "--runtime-stopped" in str(stopped_required.exception)
+    assert restored.exit_code == 0, restored.output
+    with sqlite3.connect(target_database) as connection:
+        value = connection.execute("SELECT value FROM state").fetchone()
+    assert value == ("restored",)
+    assert (storage / "runtime-documents/file.txt").read_bytes() == b"restored file"
+    assert target_key.read_bytes() == b"restored-key"

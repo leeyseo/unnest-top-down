@@ -11,6 +11,7 @@ import os
 import platform
 import shutil
 import socket
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,8 @@ import typer
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
+
+from langflow.services.runtime_backup import RuntimeBackupError, restore_runtime_backup
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 SUPPORTED_ARCHITECTURES = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
@@ -250,6 +253,46 @@ def install(package: Path = typer.Argument(..., exists=True, file_okay=False)) -
             _run([runtime, "load", "--input", str(image)], package)
         _run([runtime, "compose", "-f", "compose/compose.yml", "up", "-d"], package)
     typer.echo("installed; open the runtime URL shown by your deployment profile to complete initial setup")
+
+
+@app.command()
+def restore(
+    backup: Path = typer.Argument(..., exists=True, dir_okay=False),
+    identity_file: Path = typer.Option(..., "--identity", exists=True, dir_okay=False),
+    database_url: str = typer.Option(..., envvar="LANGFLOW_DATABASE_URL"),
+    storage_directory: Path = typer.Option(Path("/opt/unnest/data"), "--storage-dir"),
+    master_key: Path = typer.Option(Path("/opt/unnest/secrets/master.key"), "--master-key"),
+    license_directory: Path = typer.Option(Path("/opt/unnest/license"), "--license-dir"),
+    key_directory: Path = typer.Option(Path("/opt/unnest/keys"), "--key-dir"),
+    runtime_stopped: bool = typer.Option(False, "--runtime-stopped"),  # noqa: FBT001, FBT003
+    yes: bool = typer.Option(False, "--yes"),  # noqa: FBT001, FBT003
+) -> None:
+    if platform.system() != "Linux":
+        raise PackageValidationError("Only Linux is supported")
+    if not runtime_stopped:
+        raise PackageValidationError(
+            "Stop every Runtime, scheduler, and worker instance before restore, then pass --runtime-stopped"
+        )
+    if stat.S_IMODE(identity_file.stat().st_mode) & 0o077:
+        raise PackageValidationError("Recovery identity file must have mode 0600")
+    if not yes and not typer.confirm("Restore will replace runtime database, files, and keys. Continue?"):
+        raise typer.Abort
+    try:
+        result = restore_runtime_backup(
+            path=backup,
+            identity=identity_file.read_text(encoding="utf-8").strip(),
+            database_url=database_url,
+            storage_directory=storage_directory,
+            master_key_destination=master_key,
+            license_directory=license_directory,
+            key_directory=key_directory,
+        )
+    except (OSError, RuntimeBackupError, ValueError) as exc:
+        raise PackageValidationError("Runtime restore failed verification or was rolled back") from exc
+    typer.echo(
+        f"restored backup {result.backup_id} for release {result.release_version}; "
+        "run database migrations and acceptance tests before restarting traffic"
+    )
 
 
 def main() -> None:

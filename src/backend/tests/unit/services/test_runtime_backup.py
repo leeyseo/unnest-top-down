@@ -5,6 +5,8 @@ from langflow.services.runtime_backup import (
     RuntimeBackupError,
     RuntimeBackupFile,
     create_runtime_backup,
+    extract_runtime_backup,
+    restore_runtime_backup,
     verify_runtime_backup,
 )
 from langflow.services.runtime_setup import generate_age_recovery_key
@@ -37,6 +39,8 @@ def test_runtime_backup_contains_database_documents_key_and_license(monkeypatch,
         license_files=[license_file],
     )
     manifest = verify_runtime_backup(result.path, identity)
+    extracted = tmp_path / "extracted"
+    extract_runtime_backup(result.path, identity, extracted)
 
     assert result.path.parent == backup_directory
     assert result.path.stat().st_mode & 0o077 == 0
@@ -50,6 +54,8 @@ def test_runtime_backup_contains_database_documents_key_and_license(monkeypatch,
         "documents/version-1/report.txt",
         "license/license.json",
     }
+    assert (extracted / "documents/version-1/report.txt").read_bytes() == b"offline document"
+    assert (extracted / "secrets/master.key").read_bytes() == b"encrypted-database-key"
 
 
 def test_runtime_backup_rejects_wrong_identity(monkeypatch, tmp_path):
@@ -90,3 +96,94 @@ def test_runtime_backup_rejects_unsafe_entry(monkeypatch, tmp_path):
             files=[RuntimeBackupFile(archive_path="../secret", contents=b"no")],
             release_version="1.0.0",
         )
+
+
+def test_runtime_restore_replaces_database_storage_and_master_key(monkeypatch, tmp_path):
+    backup_database = tmp_path / "backup.db"
+    with sqlite3.connect(backup_database) as connection:
+        connection.execute("CREATE TABLE state (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO state VALUES ('restored')")
+    backup_key = tmp_path / "backup-master.key"
+    backup_key.write_bytes(b"restored-master-key")
+    monkeypatch.setenv("UNNEST_BACKUP_DIR", str(tmp_path / "backups"))
+    identity, recipient = generate_age_recovery_key()
+    backup = create_runtime_backup(
+        database_url=f"sqlite:///{backup_database}",
+        recipient=recipient,
+        master_key=backup_key,
+        files=[
+            RuntimeBackupFile(
+                archive_path="storage/runtime-documents/report.txt",
+                contents=b"restored document",
+            )
+        ],
+        release_version="2.0.0",
+    )
+
+    target_database = tmp_path / "target.db"
+    with sqlite3.connect(target_database) as connection:
+        connection.execute("CREATE TABLE state (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO state VALUES ('old')")
+    storage = tmp_path / "storage"
+    (storage / "runtime-documents").mkdir(parents=True)
+    (storage / "runtime-documents/report.txt").write_bytes(b"old document")
+    target_key = tmp_path / "secrets/master.key"
+    target_key.parent.mkdir()
+    target_key.write_bytes(b"old-master-key")
+
+    result = restore_runtime_backup(
+        path=backup.path,
+        identity=identity,
+        database_url=f"sqlite:///{target_database}",
+        storage_directory=storage,
+        master_key_destination=target_key,
+    )
+
+    with sqlite3.connect(target_database) as connection:
+        value = connection.execute("SELECT value FROM state").fetchone()
+    assert value == ("restored",)
+    assert (storage / "runtime-documents/report.txt").read_bytes() == b"restored document"
+    assert target_key.read_bytes() == b"restored-master-key"
+    assert result.backup_id == backup.id
+    assert result.release_version == "2.0.0"
+
+
+def test_runtime_restore_rolls_back_files_when_database_restore_fails(monkeypatch, tmp_path):
+    backup_database = tmp_path / "backup.db"
+    with sqlite3.connect(backup_database) as connection:
+        connection.execute("CREATE TABLE state (value TEXT NOT NULL)")
+    backup_key = tmp_path / "backup-master.key"
+    backup_key.write_bytes(b"restored-master-key")
+    monkeypatch.setenv("UNNEST_BACKUP_DIR", str(tmp_path / "backups"))
+    identity, recipient = generate_age_recovery_key()
+    backup = create_runtime_backup(
+        database_url=f"sqlite:///{backup_database}",
+        recipient=recipient,
+        master_key=backup_key,
+        files=[
+            RuntimeBackupFile(
+                archive_path="storage/runtime-documents/report.txt",
+                contents=b"restored document",
+            )
+        ],
+        release_version="2.0.0",
+    )
+    storage = tmp_path / "storage"
+    (storage / "runtime-documents").mkdir(parents=True)
+    document = storage / "runtime-documents/report.txt"
+    document.write_bytes(b"old document")
+    target_key = tmp_path / "secrets/master.key"
+    target_key.parent.mkdir()
+    target_key.write_bytes(b"old-master-key")
+
+    with pytest.raises(RuntimeBackupError, match="does not match"):
+        restore_runtime_backup(
+            path=backup.path,
+            identity=identity,
+            database_url="postgresql://runtime@database/runtime",
+            storage_directory=storage,
+            master_key_destination=target_key,
+        )
+
+    assert document.read_bytes() == b"old document"
+    assert target_key.read_bytes() == b"old-master-key"
