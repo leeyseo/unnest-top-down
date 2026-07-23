@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
 from struct import pack
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 import filetype
@@ -28,7 +28,7 @@ from fastapi.responses import Response, StreamingResponse
 from jsonschema import Draft202012Validator
 from lfx.log.logger import logger
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, SecretStr
 from sqlmodel import col, func, select
 from starlette.background import BackgroundTask
 
@@ -50,6 +50,7 @@ from langflow.services.database.models.runtime_schedule import RuntimeSchedule
 from langflow.services.database.models.user.model import User
 from langflow.services.deployment import SandboxWorkerClient
 from langflow.services.deps import (
+    get_auth_service,
     get_job_service,
     get_queue_service,
     get_settings_service,
@@ -142,6 +143,56 @@ class RuntimeScheduleRead(BaseModel):
     last_finished_at: datetime | None
     last_status: str | None
     last_error: str | None
+
+
+class RuntimeUserCreate(BaseModel):
+    username: str = Field(min_length=1, max_length=255)
+    password: SecretStr = Field(min_length=12)
+    role: Literal["admin", "general"] = "general"
+    is_active: bool = True
+
+
+class RuntimeUserUpdate(BaseModel):
+    username: str | None = Field(default=None, min_length=1, max_length=255)
+    password: SecretStr | None = Field(default=None, min_length=12)
+    role: Literal["admin", "general"] | None = None
+    is_active: bool | None = None
+
+
+class RuntimeUserRead(BaseModel):
+    id: UUID
+    username: str
+    role: Literal["admin", "general"]
+    is_active: bool
+    created_at: datetime
+    last_login_at: datetime | None
+
+
+def _runtime_user_read(user: User) -> RuntimeUserRead:
+    return RuntimeUserRead(
+        id=user.id,
+        username=user.username,
+        role="admin" if user.is_superuser else "general",
+        is_active=user.is_active,
+        created_at=user.create_at,
+        last_login_at=user.last_login_at,
+    )
+
+
+async def _ensure_another_admin(session: DbSession, user: User) -> None:
+    if not user.is_superuser:
+        return
+    remaining = (
+        await session.exec(
+            select(func.count(User.id)).where(
+                User.id != user.id,
+                User.is_superuser.is_(True),
+                User.is_active.is_(True),
+            )
+        )
+    ).one()
+    if int(remaining) < 1:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="At least one active admin is required")
 
 
 async def _record_runtime_audit_event(**kwargs: Any) -> None:
@@ -968,6 +1019,119 @@ async def delete_runtime_api_key(
         actor_user_id=admin.id,
         resource_type="api_key",
         resource_id=str(api_key_id),
+    )
+
+
+@router.get("/api/v1/admin/users")
+async def list_runtime_users(
+    session: DbSessionReadOnly,
+    _admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> list[RuntimeUserRead]:
+    users = (await session.exec(select(User).order_by(col(User.username)))).all()
+    return [_runtime_user_read(user) for user in users]
+
+
+@router.post("/api/v1/admin/users", status_code=status.HTTP_201_CREATED)
+async def create_runtime_user(
+    payload: RuntimeUserCreate,
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> RuntimeUserRead:
+    username = payload.username.strip()
+    if (await session.exec(select(User).where(User.username == username))).first():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
+    user = User(
+        username=username,
+        password=get_auth_service().get_password_hash(payload.password.get_secret_value()),
+        is_superuser=payload.role == "admin",
+        is_active=payload.is_active,
+    )
+    session.add(user)
+    await session.flush()
+    await append_runtime_audit_event(
+        session,
+        event_type="user.created",
+        actor_user_id=admin.id,
+        resource_type="user",
+        resource_id=str(user.id),
+        details={"role": payload.role, "is_active": payload.is_active},
+    )
+    return _runtime_user_read(user)
+
+
+@router.patch("/api/v1/admin/users/{user_id}")
+async def update_runtime_user(
+    user_id: UUID,
+    payload: RuntimeUserUpdate,
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> RuntimeUserRead:
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if user.id == admin.id and (
+        payload.role == "general" or payload.is_active is False
+    ):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An admin cannot demote or disable itself")
+    if user.is_superuser and (
+        payload.role == "general" or payload.is_active is False
+    ):
+        await _ensure_another_admin(session, user)
+    if payload.username is not None:
+        username = payload.username.strip()
+        existing = (
+            await session.exec(select(User).where(User.username == username, User.id != user.id))
+        ).first()
+        if existing:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
+        user.username = username
+    if payload.password is not None:
+        user.password = get_auth_service().get_password_hash(payload.password.get_secret_value())
+    if payload.role is not None:
+        user.is_superuser = payload.role == "admin"
+    if payload.is_active is not None:
+        user.is_active = payload.is_active
+    user.updated_at = datetime.now(timezone.utc)
+    session.add(user)
+    await append_runtime_audit_event(
+        session,
+        event_type="user.updated",
+        actor_user_id=admin.id,
+        resource_type="user",
+        resource_id=str(user.id),
+        details={
+            "username_changed": payload.username is not None,
+            "password_changed": payload.password is not None,
+            "role": payload.role,
+            "is_active": payload.is_active,
+        },
+    )
+    return _runtime_user_read(user)
+
+
+@router.delete("/api/v1/admin/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_runtime_user(
+    user_id: UUID,
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> None:
+    user = await session.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if user.id == admin.id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An admin cannot delete itself")
+    if (await session.exec(select(DeploymentRelease.id).where(DeploymentRelease.user_id == user.id))).first():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A release owner cannot be deleted")
+    await _ensure_another_admin(session, user)
+    username = user.username
+    await session.delete(user)
+    await append_runtime_audit_event(
+        session,
+        event_type="user.deleted",
+        actor_user_id=admin.id,
+        resource_type="user",
+        resource_id=str(user.id),
+        details={"username": username},
     )
 
 
