@@ -20,6 +20,7 @@ export type OnPremWizardValues = {
   allowLanguageSwitch: boolean;
   solutionName: string;
   organizationName: string;
+  logoUrl: string;
   primaryColor: string;
   loginNotice: string;
   showUnnestBranding: boolean;
@@ -87,6 +88,7 @@ export const defaultOnPremWizardValues: OnPremWizardValues = {
   allowLanguageSwitch: true,
   solutionName: "Unnest",
   organizationName: "",
+  logoUrl: "",
   primaryColor: "#2563eb",
   loginNotice: "",
   showUnnestBranding: true,
@@ -142,6 +144,7 @@ export function buildOnPremReleasePayload(
       branding: {
         solution_name: values.solutionName.trim(),
         organization_name: values.organizationName.trim(),
+        logo_url: values.logoUrl.trim() || null,
         primary_color: values.primaryColor,
         login_notice: values.loginNotice,
         show_unnest_branding: values.showUnnestBranding,

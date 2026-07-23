@@ -12,6 +12,7 @@ describe("on-prem release payload", () => {
       accelerator: "nvidia",
       gpuCount: 2,
       storeConversations: true,
+      logoUrl: "https://agency.example/logo.svg",
       externalEndpoints: "https://model.internal\nhttps://vector.internal",
       secretNames: "MODEL_TOKEN, STORAGE_KEY",
       apiContract: JSON.stringify({
@@ -32,6 +33,7 @@ describe("on-prem release payload", () => {
       external_endpoints: ["https://model.internal", "https://vector.internal"],
       additional_secret_names: ["MODEL_TOKEN", "STORAGE_KEY"],
       resources: { gpu_count: 2 },
+      branding: { logo_url: "https://agency.example/logo.svg" },
     });
     expect(JSON.stringify(payload)).not.toContain("secret_value");
   });

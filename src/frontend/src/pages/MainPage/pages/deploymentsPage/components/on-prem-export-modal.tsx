@@ -54,7 +54,7 @@ function Field({
   label: string;
   value: string | number;
   onChange: (value: string) => void;
-  type?: "text" | "number" | "color";
+  type?: "text" | "number" | "color" | "url";
   min?: number;
 }) {
   return (
@@ -547,6 +547,13 @@ export default function OnPremExportModal({
                   label="Organization"
                   value={values.organizationName}
                   onChange={(value) => update("organizationName", value)}
+                />
+                <Field
+                  id="on-prem-logo-url"
+                  label="Logo URL"
+                  type="url"
+                  value={values.logoUrl}
+                  onChange={(value) => update("logoUrl", value)}
                 />
                 <Field
                   id="on-prem-primary-color"

@@ -20,6 +20,8 @@ export default defineConfig(({ mode }) => {
   });
 
   const envLangflow = envLangflowResult.parsed || {};
+  const unnestRuntime =
+    (env.UNNEST_RUNTIME ?? envLangflow.UNNEST_RUNTIME ?? "false") === "true";
 
   const apiRoutes = API_ROUTES || ["^/api/v1/", "^/api/v2/", "/health"];
 
@@ -84,6 +86,14 @@ export default defineConfig(({ mode }) => {
         requireEnv: false,
       }),
     ],
+    resolve: {
+      alias: {
+        "@/app-router": path.resolve(
+          __dirname,
+          unnestRuntime ? "src/runtime-routes.tsx" : "src/app-router.ts",
+        ),
+      },
+    },
     server: {
       port: port,
       proxy: {

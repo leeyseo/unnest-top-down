@@ -1,3 +1,4 @@
+import "@xyflow/react/dist/style.css";
 import { lazy } from "react";
 import {
   createBrowserRouter,

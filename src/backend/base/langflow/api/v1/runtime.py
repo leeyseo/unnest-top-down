@@ -1168,11 +1168,18 @@ async def _latest_runtime_release(session: DbSessionReadOnly) -> DeploymentRelea
 @router.get("/api/v1/setup/status")
 async def runtime_setup_status(session: DbSessionReadOnly) -> dict[str, Any]:
     release = await _latest_runtime_release(session)
+    releases = (
+        await session.exec(select(DeploymentRelease).order_by(col(DeploymentRelease.created_at).desc()))
+    ).all()
     configuration = await session.get(RuntimeConfiguration, 1)
     required_secrets = release.manifest.get("secret_names", []) if release else []
     return {
         "complete": await _setup_complete(session),
         "release_version": release.version if release else None,
+        "api_versions": list(dict.fromkeys(item.api_version for item in releases)),
+        "branding": release.config.get("branding", {}) if release else {},
+        "default_language": release.config.get("default_language", "ko") if release else "ko",
+        "allow_language_switch": release.config.get("allow_language_switch", True) if release else True,
         "license": runtime_license_status(release.version if release else None),
         "required_secret_names": required_secrets if isinstance(required_secrets, list) else [],
         "configured_secret_names": sorted(

@@ -1,8 +1,6 @@
-import "@xyflow/react/dist/style.css";
 import { Suspense, useEffect } from "react";
 import { RouterProvider } from "react-router-dom";
-import { LoadingPage } from "./pages/LoadingPage";
-import router from "./routes";
+import router from "@/app-router";
 import { useDarkStore } from "./stores/darkStore";
 
 export default function App() {
@@ -15,7 +13,16 @@ export default function App() {
     }
   }, [dark]);
   return (
-    <Suspense fallback={<LoadingPage />}>
+    <Suspense
+      fallback={
+        <div
+          className="flex h-screen w-screen items-center justify-center bg-background"
+          role="status"
+        >
+          Loading…
+        </div>
+      }
+    >
       <RouterProvider router={router} />
     </Suspense>
   );

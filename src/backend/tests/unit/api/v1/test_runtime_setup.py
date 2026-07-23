@@ -35,7 +35,12 @@ async def _release(async_session, *, secret_names: list[str]) -> DeploymentRelea
         version="1.0.0",
         agent_flow_version_id=agent_version.id,
         ingestion_flow_version_id=ingestion_version.id,
-        config={"tls": "self-signed"},
+        config={
+            "tls": "self-signed",
+            "default_language": "en",
+            "allow_language_switch": False,
+            "branding": {"solution_name": "Agency Agent", "show_unnest_branding": False},
+        },
         manifest={"secret_names": secret_names},
         api_version="v1",
     )
@@ -82,6 +87,10 @@ async def test_runtime_setup_persists_encrypted_secrets_and_first_admin(
         await async_session.exec(select(User).where(User.username == "runtime-admin"))
     ).one()
     assert result["complete"] is True
+    assert result["api_versions"] == ["v1"]
+    assert result["default_language"] == "en"
+    assert result["allow_language_switch"] is False
+    assert result["branding"]["solution_name"] == "Agency Agent"
     assert result["recovery_identity"].startswith("AGE-SECRET-KEY-1")
     assert configuration is not None
     assert "top-secret" not in configuration.encrypted_secrets
