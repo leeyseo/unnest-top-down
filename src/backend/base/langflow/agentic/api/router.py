@@ -36,8 +36,19 @@ from langflow.agentic.services.provider_service import (
     list_installed_tool_calling_models,
 )
 from langflow.api.utils.core import CurrentActiveUser, DbSession
+from langflow.services.database.models.user_component_visibility.crud import get_component_visibility
 
 router = APIRouter(prefix="/agentic", tags=["Agentic"])
+
+
+async def _component_visibility_args(current_user: CurrentActiveUser, session: AsyncSession) -> dict[str, list[str]]:
+    if current_user.is_superuser:
+        return {"hidden_bundles": [], "hidden_components": []}
+    visibility = await get_component_visibility(session, current_user.id)
+    return {
+        "hidden_bundles": visibility.hidden_bundles if visibility else [],
+        "hidden_components": visibility.hidden_components if visibility else [],
+    }
 
 
 @dataclass(frozen=True)
@@ -285,6 +296,7 @@ async def assist(
     """Chat with the Langflow Assistant."""
     await _validate_flow_access(request.flow_id, current_user.id, session)
     ctx = await _resolve_assistant_context(request, current_user.id, session)
+    visibility_args = await _component_visibility_args(current_user, session)
 
     logger.info(f"Executing {LANGFLOW_ASSISTANT_FLOW} with {ctx.provider}/{ctx.model_name}")
 
@@ -298,6 +310,7 @@ async def assist(
         provider=ctx.provider,
         model_name=ctx.model_name,
         api_key_var=ctx.api_key_name,
+        **visibility_args,
     )
 
 
@@ -311,6 +324,7 @@ async def assist_stream(
     """Chat with the Langflow Assistant with streaming progress updates."""
     await _validate_flow_access(request.flow_id, current_user.id, session)
     ctx = await _resolve_assistant_context(request, current_user.id, session)
+    visibility_args = await _component_visibility_args(current_user, session)
 
     return StreamingResponse(
         execute_flow_with_validation_streaming(
@@ -324,6 +338,7 @@ async def assist_stream(
             model_name=ctx.model_name,
             api_key_var=ctx.api_key_name,
             is_disconnected=http_request.is_disconnected,
+            **visibility_args,
         ),
         media_type="text/event-stream",
         headers={

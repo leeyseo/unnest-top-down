@@ -23,7 +23,7 @@ from ._state import (
     _emit,
     _ensure_working_flow,
     _find_node,
-    _load_registry_user_aware,
+    _load_visible_registry_user_aware,
     node_existed_at_start,
     should_apply_edits_live,
     should_propose_existing_edits,
@@ -52,7 +52,7 @@ class AddComponent(Component):
     ]
 
     def add_component(self) -> Data:
-        registry = _load_registry_user_aware()
+        registry = _load_visible_registry_user_aware()
         flow = _ensure_working_flow()
         try:
             result = fb_add_component(flow, self.component_type, registry)

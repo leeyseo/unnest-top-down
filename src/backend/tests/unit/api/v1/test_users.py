@@ -171,6 +171,82 @@ async def test_read_all_users(client: AsyncClient, logged_in_headers_super_user)
     assert isinstance(result, dict), "The result must be a dictionary"
     assert "total_count" in result, "The result must have an 'total_count' key"
     assert "users" in result, "The result must have an 'users' key"
+    assert "component_visibility" in result["users"][0]
+
+
+async def test_admin_manages_user_component_visibility(client: AsyncClient, logged_in_headers_super_user):
+    create_response = await client.post(
+        "api/v1/users/",
+        json={"username": "visibility_user", "password": "password123"},
+        headers=logged_in_headers_super_user,
+    )
+    assert create_response.status_code == status.HTTP_201_CREATED
+    user_id = create_response.json()["id"]
+
+    default_response = await client.get(
+        f"api/v1/users/{user_id}/component-visibility",
+        headers=logged_in_headers_super_user,
+    )
+    assert default_response.status_code == status.HTTP_200_OK
+    assert default_response.json()["hidden_bundles"] == []
+    assert default_response.json()["hidden_components"] == []
+
+    update_response = await client.put(
+        f"api/v1/users/{user_id}/component-visibility",
+        json={
+            "hidden_bundles": ["anthropic", "anthropic"],
+            "hidden_components": ["openai.ChatOpenAIComponent"],
+        },
+        headers=logged_in_headers_super_user,
+    )
+    assert update_response.status_code == status.HTTP_200_OK
+    assert update_response.json()["hidden_bundles"] == ["anthropic"]
+    assert update_response.json()["hidden_components"] == ["openai.ChatOpenAIComponent"]
+
+    users_response = await client.get(
+        "api/v1/users/?search=visibility_user",
+        headers=logged_in_headers_super_user,
+    )
+    assert users_response.status_code == status.HTTP_200_OK
+    assert users_response.json()["users"][0]["component_visibility"] == {
+        "hidden_bundle_count": 1,
+        "hidden_component_count": 1,
+    }
+
+    reset_response = await client.put(
+        f"api/v1/users/{user_id}/component-visibility",
+        json={"hidden_bundles": [], "hidden_components": []},
+        headers=logged_in_headers_super_user,
+    )
+    assert reset_response.status_code == status.HTTP_200_OK
+    assert reset_response.json()["hidden_bundles"] == []
+    assert reset_response.json()["updated_at"] is None
+
+    superuser_response = await client.get("api/v1/users/whoami", headers=logged_in_headers_super_user)
+    superuser_id = superuser_response.json()["id"]
+    rejected_response = await client.put(
+        f"api/v1/users/{superuser_id}/component-visibility",
+        json={"hidden_bundles": ["openai"], "hidden_components": []},
+        headers=logged_in_headers_super_user,
+    )
+    assert rejected_response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+async def test_regular_user_component_visibility_is_read_only(client: AsyncClient, logged_in_headers, active_user):
+    read_response = await client.get(
+        "api/v1/users/whoami/component-visibility",
+        headers=logged_in_headers,
+    )
+    assert read_response.status_code == status.HTTP_200_OK
+    assert read_response.json()["user_id"] == str(active_user.id)
+    assert read_response.json()["hidden_bundles"] == []
+
+    update_response = await client.put(
+        f"api/v1/users/{active_user.id}/component-visibility",
+        json={"hidden_bundles": ["openai"], "hidden_components": []},
+        headers=logged_in_headers,
+    )
+    assert update_response.status_code == status.HTTP_403_FORBIDDEN
 
 
 async def test_patch_user(client: AsyncClient, logged_in_headers_super_user):

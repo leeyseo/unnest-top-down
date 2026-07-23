@@ -22,7 +22,7 @@ from ._state import (
     _current_flow_id_var,
     _emit,
     _ensure_working_flow,
-    _load_registry_user_aware,
+    _load_visible_registry_user_aware,
     get_working_flow,
     isolate_flow_run_context,
 )
@@ -126,7 +126,7 @@ class BuildFlowFromSpec(Component):
         # Pass the user-aware registry so user-registered Components
         # (created via Layer-2 validated generation) are addressable in
         # the spec by their class name.
-        result = build_flow_from_spec(self.spec, registry=_load_registry_user_aware())
+        result = build_flow_from_spec(self.spec, registry=_load_visible_registry_user_aware())
         if "error" in result:
             error_msg = f"Flow build failed: {result['error']}"
             if "details" in result:
@@ -225,7 +225,7 @@ class RunFlow(Component):
     the agent so it can answer follow-up questions about it.
 
     Decoupled from ``langflow`` via a late import (same pattern as
-    ``_load_registry_user_aware``): ``lfx`` may run without the backend.
+    ``_load_visible_registry_user_aware``): ``lfx`` may run without the backend.
     """
 
     display_name = "Run Flow"

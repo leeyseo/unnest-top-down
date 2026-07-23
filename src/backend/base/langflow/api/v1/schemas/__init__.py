@@ -23,7 +23,7 @@ from langflow.serialization.serialization import get_max_items_length, get_max_t
 from langflow.services.database.models.api_key.model import ApiKeyRead
 from langflow.services.database.models.base import orjson_dumps
 from langflow.services.database.models.flow.model import FlowCreate, FlowRead
-from langflow.services.database.models.user.model import UserRead
+from langflow.services.database.models.user_component_visibility.model import AdminUserRead
 from langflow.services.tracing.schema import Log
 
 
@@ -225,7 +225,7 @@ class ComponentListRead(BaseModel):
 
 class UsersResponse(BaseModel):
     total_count: int
-    users: list[UserRead]
+    users: list[AdminUserRead]
 
 
 class ApiKeyResponse(BaseModel):

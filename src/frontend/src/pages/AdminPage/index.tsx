@@ -8,6 +8,7 @@ import {
   useGetUsers,
   useUpdateUser,
 } from "@/controllers/API/queries/auth";
+import { useGetTypes } from "@/controllers/API/queries/flows/use-get-types";
 import CustomLoader from "@/customization/components/custom-loader";
 import { useCustomNavigate } from "@/customization/hooks/use-custom-navigate";
 import IconComponent from "../../components/common/genericIconComponent";
@@ -29,9 +30,11 @@ import {
   PAGINATION_SIZE,
 } from "../../constants/constants";
 import { AuthContext } from "../../contexts/authContext";
+import ComponentVisibilityModal from "../../modals/componentVisibilityModal";
 import ConfirmationModal from "../../modals/confirmationModal";
 import UserManagementModal from "../../modals/userManagementModal";
 import useAlertStore from "../../stores/alertStore";
+import { useTypesStore } from "../../stores/typesStore";
 import type { Users } from "../../types/api";
 import type { UserInputType } from "../../types/components";
 
@@ -52,6 +55,10 @@ export default function AdminPage() {
   const { mutate: mutateAddUser } = useAddUser();
 
   const [userList, setUserList] = useState<Users[]>([]);
+  const [visibilityUser, setVisibilityUser] = useState<Users | null>(null);
+  const componentCatalog = useTypesStore((state) => state.data);
+
+  useGetTypes({ enabled: Object.keys(componentCatalog).length === 0 });
 
   const { mutate: mutateGetUsers, isPending, isIdle } = useGetUsers({});
 
@@ -327,6 +334,9 @@ export default function AdminPage() {
                       <TableHead className="h-10">
                         {t("admin.columnSuperuser")}
                       </TableHead>
+                      <TableHead className="h-10 w-[230px]">
+                        {t("admin.columnComponents")}
+                      </TableHead>
                       <TableHead className="h-10">
                         {t("admin.columnCreatedAt")}
                       </TableHead>
@@ -338,7 +348,7 @@ export default function AdminPage() {
                   </TableHeader>
                   {
                     <TableBody className="border-b">
-                      {userList.map((user: UserInputType, index) => (
+                      {userList.map((user: Users, index) => (
                         <TableRow key={user.id}>
                           <TableCell className="truncate py-2 font-medium">
                             <ShadTooltip content={user.id}>
@@ -421,6 +431,28 @@ export default function AdminPage() {
                                 </div>
                               </ConfirmationModal.Trigger>
                             </ConfirmationModal>
+                          </TableCell>
+                          <TableCell className="truncate py-2">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="max-w-full"
+                              disabled={user.is_superuser}
+                              onClick={() => setVisibilityUser(user)}
+                            >
+                              <span className="truncate">
+                                {user.is_superuser
+                                  ? t("admin.componentVisibilityAllShown")
+                                  : t("admin.componentVisibilitySummary", {
+                                      bundles:
+                                        user.component_visibility
+                                          ?.hidden_bundle_count ?? 0,
+                                      components:
+                                        user.component_visibility
+                                          ?.hidden_component_count ?? 0,
+                                    })}
+                              </span>
+                            </Button>
                           </TableCell>
                           <TableCell className="truncate py-2">
                             {
@@ -507,6 +539,17 @@ export default function AdminPage() {
               </div>
             </div>
           )}
+          <ComponentVisibilityModal
+            open={visibilityUser !== null}
+            setOpen={(open) => {
+              if (!open) setVisibilityUser(null);
+            }}
+            user={visibilityUser}
+            catalog={componentCatalog}
+            onSaved={() =>
+              fetchUsers(size * (index - 1), size, inputValue || undefined)
+            }
+          />
         </div>
       )}
     </>

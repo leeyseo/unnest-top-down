@@ -1,3 +1,4 @@
+export * from "./use-component-visibility";
 export * from "./use-delete-users";
 export * from "./use-get-auth-session";
 export * from "./use-get-autologin";

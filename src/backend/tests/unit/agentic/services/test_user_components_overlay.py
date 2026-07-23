@@ -14,9 +14,14 @@ from unittest.mock import patch
 
 import lfx.custom.utils as lfx_utils
 import pytest
+from langflow.agentic.services.component_visibility_context import (
+    reset_component_visibility,
+    set_component_visibility,
+)
 from langflow.agentic.services.user_components import register_user_component
 from langflow.agentic.services.user_components_overlay import (
     load_registry_with_user_overlay,
+    load_visible_registry_for_current_user,
 )
 
 if TYPE_CHECKING:
@@ -58,6 +63,7 @@ def isolated_sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     from langflow.agentic.services.user_components_overlay import _OVERLAY_ENTRY_CACHE
 
     reset_current_user_id()
+    reset_component_visibility()
     _OVERLAY_ENTRY_CACHE.clear()
     return tmp_path
 
@@ -94,6 +100,28 @@ class TestOverlayEntryCaching:
 
 
 class TestRegistryOverlay:
+    def test_discovery_registry_filters_builtins_but_keeps_user_components(self) -> None:
+        registry = {
+            "VisibleComponent": {"category": "visible"},
+            "HiddenBundleComponent": {"category": "hidden_bundle"},
+            "HiddenSingleComponent": {"category": "visible"},
+            "GeneratedComponent": {"category": "custom_component", "custom": True},
+        }
+        set_component_visibility(
+            ["hidden_bundle"],
+            ["visible.HiddenSingleComponent", "custom_component.GeneratedComponent"],
+        )
+        try:
+            with patch(
+                "langflow.agentic.services.user_components_overlay.load_registry_for_current_user",
+                return_value=registry,
+            ):
+                visible = load_visible_registry_for_current_user()
+        finally:
+            reset_component_visibility()
+
+        assert set(visible) == {"VisibleComponent", "GeneratedComponent"}
+
     def test_should_return_base_registry_when_no_user_components_exist(self, isolated_sandbox: Path) -> None:  # noqa: ARG002
         registry = load_registry_with_user_overlay(user_id="user-alice")
         # Base registry contains a known component.

@@ -13,9 +13,34 @@ from langflow.initial_setup.setup import get_or_create_default_folder
 from langflow.services.auth.utils import get_current_active_superuser, get_current_user_optional
 from langflow.services.database.models.user.crud import get_user_by_id, update_user
 from langflow.services.database.models.user.model import User, UserCreate, UserRead, UserUpdate
+from langflow.services.database.models.user_component_visibility.crud import (
+    effective_component_visibility,
+    get_component_visibility,
+    save_component_visibility,
+)
+from langflow.services.database.models.user_component_visibility.model import (
+    AdminUserRead,
+    ComponentVisibilityRead,
+    ComponentVisibilitySummary,
+    ComponentVisibilityUpdate,
+    UserComponentVisibility,
+)
 from langflow.services.deps import get_auth_service, get_settings_service
 
 router = APIRouter(tags=["Users"], prefix="/users")
+
+
+def _visibility_summary(
+    user: User,
+    visibility_by_user: dict[UUID, UserComponentVisibility],
+) -> ComponentVisibilitySummary:
+    visibility = visibility_by_user.get(user.id)
+    if user.is_superuser or visibility is None:
+        return ComponentVisibilitySummary()
+    return ComponentVisibilitySummary(
+        hidden_bundle_count=len(visibility.hidden_bundles),
+        hidden_component_count=len(visibility.hidden_components),
+    )
 
 
 @router.post("/", response_model=UserRead, status_code=201)
@@ -72,6 +97,50 @@ async def read_current_user(
     return current_user
 
 
+@router.get("/whoami/component-visibility")
+async def read_current_user_component_visibility(
+    current_user: CurrentActiveUser,
+    session: DbSession,
+) -> ComponentVisibilityRead:
+    """Return the current user's effective component picker visibility."""
+    if current_user.is_superuser:
+        return effective_component_visibility(current_user.id, None)
+    visibility = await get_component_visibility(session, current_user.id)
+    return effective_component_visibility(current_user.id, visibility)
+
+
+@router.get(
+    "/{user_id}/component-visibility",
+    dependencies=[Depends(get_current_active_superuser)],
+)
+async def read_user_component_visibility(user_id: UUID, session: DbSession) -> ComponentVisibilityRead:
+    """Return a user's component picker visibility for administration."""
+    user = await get_user_by_id(session, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.is_superuser:
+        return effective_component_visibility(user.id, None)
+    visibility = await get_component_visibility(session, user.id)
+    return effective_component_visibility(user.id, visibility)
+
+
+@router.put("/{user_id}/component-visibility")
+async def update_user_component_visibility(
+    user_id: UUID,
+    update: ComponentVisibilityUpdate,
+    current_user: Annotated[User, Depends(get_current_active_superuser)],
+    session: DbSession,
+) -> ComponentVisibilityRead:
+    """Set a user's component picker visibility."""
+    user = await get_user_by_id(session, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if user.is_superuser:
+        raise HTTPException(status_code=400, detail="Superusers always see all components")
+    visibility = await save_component_visibility(session, user.id, current_user.id, update)
+    return effective_component_visibility(user.id, visibility)
+
+
 @router.get("/", dependencies=[Depends(get_current_active_superuser)])
 async def read_all_users(
     *,
@@ -93,9 +162,24 @@ async def read_all_users(
     users = (await session.exec(query)).fetchall()
     total_count = (await session.exec(count_query)).first()
 
+    visibility_by_user: dict[UUID, UserComponentVisibility] = {}
+    if users:
+        visibility_query = select(UserComponentVisibility).where(
+            UserComponentVisibility.user_id.in_([user.id for user in users])  # type: ignore[union-attr]
+        )
+        visibility_by_user = {
+            visibility.user_id: visibility for visibility in (await session.exec(visibility_query)).all()
+        }
+
     return UsersResponse(
         total_count=total_count,
-        users=[UserRead(**user.model_dump()) for user in users],
+        users=[
+            AdminUserRead(
+                **user.model_dump(),
+                component_visibility=_visibility_summary(user, visibility_by_user),
+            )
+            for user in users
+        ],
     )
 
 

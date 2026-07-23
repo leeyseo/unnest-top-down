@@ -30,6 +30,7 @@ from ._state import _emit as _emit
 from ._state import _ensure_working_flow as _ensure_working_flow
 from ._state import _find_node as _find_node
 from ._state import _load_registry_user_aware as _load_registry_user_aware
+from ._state import _load_visible_registry_user_aware as _load_visible_registry_user_aware
 from ._state import _readable_preview as _readable_preview
 from ._state import (
     drain_flow_events,

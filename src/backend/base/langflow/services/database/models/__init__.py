@@ -26,6 +26,7 @@ from .message import MessageTable
 from .traces.model import SpanTable, TraceTable
 from .transactions import TransactionTable
 from .user import User
+from .user_component_visibility import UserComponentVisibility
 from .variable import Variable
 
 __all__ = [
@@ -61,5 +62,6 @@ __all__ = [
     "TraceTable",
     "TransactionTable",
     "User",
+    "UserComponentVisibility",
     "Variable",
 ]

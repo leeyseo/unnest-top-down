@@ -206,10 +206,24 @@ export type Users = {
   profile_image: string;
   create_at: Date;
   updated_at: Date;
+  component_visibility?: ComponentVisibilitySummary;
   optins?: {
     dialog_dismissed?: boolean;
     mcp_dialog_dismissed?: boolean;
   };
+};
+
+export type ComponentVisibility = {
+  user_id: string;
+  hidden_bundles: string[];
+  hidden_components: string[];
+  updated_by?: string | null;
+  updated_at?: string | null;
+};
+
+export type ComponentVisibilitySummary = {
+  hidden_bundle_count: number;
+  hidden_component_count: number;
 };
 
 export type Component = {

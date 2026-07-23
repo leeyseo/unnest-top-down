@@ -51,6 +51,10 @@ from langflow.agentic.services.agent_run_context import (
     set_requested_agent_model,
 )
 from langflow.agentic.services.component_events import drain_component_events, reset_component_events
+from langflow.agentic.services.component_visibility_context import (
+    reset_component_visibility,
+    set_component_visibility,
+)
 from langflow.agentic.services.conversation_buffer import (
     ConversationTurn,
     get_conversation_buffer,
@@ -297,6 +301,40 @@ async def execute_flow_with_validation(
     provider: str | None = None,
     model_name: str | None = None,
     api_key_var: str | None = None,
+    hidden_bundles: list[str] | None = None,
+    hidden_components: list[str] | None = None,
+) -> dict:
+    """Run the non-streaming Assistant with request-local Component visibility."""
+    set_current_user_id(user_id)
+    set_component_visibility(hidden_bundles or [], hidden_components or [])
+    try:
+        return await _execute_flow_with_validation(
+            flow_filename=flow_filename,
+            input_value=input_value,
+            global_variables=global_variables,
+            max_retries=max_retries,
+            user_id=user_id,
+            session_id=session_id,
+            provider=provider,
+            model_name=model_name,
+            api_key_var=api_key_var,
+        )
+    finally:
+        reset_current_user_id()
+        reset_component_visibility()
+
+
+async def _execute_flow_with_validation(
+    flow_filename: str,
+    input_value: str,
+    global_variables: dict[str, str],
+    *,
+    max_retries: int = MAX_VALIDATION_RETRIES,
+    user_id: str | None = None,
+    session_id: str | None = None,
+    provider: str | None = None,
+    model_name: str | None = None,
+    api_key_var: str | None = None,
 ) -> dict:
     """Execute flow and validate the generated component code.
 
@@ -522,6 +560,8 @@ async def execute_flow_with_validation_streaming(
     api_key_var: str | None = None,
     is_disconnected: Callable[[], Coroutine[Any, Any, bool]] | None = None,
     apply_edits_immediately: bool = False,
+    hidden_bundles: list[str] | None = None,
+    hidden_components: list[str] | None = None,
 ) -> AsyncGenerator[str, None]:
     """Execute flow with validation, yielding SSE progress and token events.
 
@@ -784,6 +824,7 @@ async def execute_flow_with_validation_streaming(
         # ``reset_current_user_id`` in the ``finally`` — otherwise a stale id
         # would leak to the next request on the same asyncio task.
         set_current_user_id(user_id)
+        set_component_visibility(hidden_bundles or [], hidden_components or [])
         # The generate_component tool re-runs the component-gen LLM flow
         # mid-loop and needs the same provider/model the request used.
         set_agent_run_model(provider, model_name, api_key_var)
@@ -1399,6 +1440,7 @@ async def execute_flow_with_validation_streaming(
         # Clear the per-request user binding so any background task that
         # inherits this context doesn't see a stale id.
         reset_current_user_id()
+        reset_component_visibility()
         reset_agent_run_model()
         reset_requested_agent_model()
         # Persist the completed turn to the session buffer so the next

@@ -23,6 +23,7 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import SkeletonGroup from "@/components/ui/skeletonGroup";
+import { useGetCurrentComponentVisibility } from "@/controllers/API/queries/auth";
 import { useGetMCPServers } from "@/controllers/API/queries/mcp/use-get-mcp-servers";
 import {
   ENABLE_KNOWLEDGE_BASES,
@@ -30,6 +31,7 @@ import {
 } from "@/customization/feature-flags";
 import { useAddComponent } from "@/hooks/use-add-component";
 import { useShortcutsStore } from "@/stores/shortcuts";
+import { filterComponentCatalog } from "@/utils/component-visibility";
 import { setLocalStorage } from "@/utils/local-storage-util";
 import {
   nodeColors,
@@ -162,17 +164,20 @@ interface FlowSidebarComponentProps {
 export function FlowSidebarComponent({ isLoading }: FlowSidebarComponentProps) {
   const { t } = useTranslation();
   const rawData = useTypesStore((state) => state.data);
+  const { data: componentVisibility, isLoading: isComponentVisibilityLoading } =
+    useGetCurrentComponentVisibility();
 
   // Filter out knowledge components from files_and_knowledge category when ENABLE_KNOWLEDGE_BASES is OFF
   const data = useMemo(() => {
+    const visibleData = filterComponentCatalog(rawData, componentVisibility);
     if (ENABLE_KNOWLEDGE_BASES) {
-      return rawData;
+      return visibleData;
     }
 
     const knowledgeComponentNames = ["KnowledgeBase"];
 
     // Create a deep copy to avoid mutating the original
-    const filteredData = cloneDeep(rawData);
+    const filteredData = cloneDeep(visibleData);
 
     if (filteredData.files_and_knowledge) {
       // Filter out knowledge components by creating a new object without them
@@ -186,7 +191,7 @@ export function FlowSidebarComponent({ isLoading }: FlowSidebarComponentProps) {
     }
 
     return filteredData;
-  }, [rawData]);
+  }, [rawData, componentVisibility]);
 
   const {
     getFilterEdge,
@@ -281,7 +286,7 @@ export function FlowSidebarComponent({ isLoading }: FlowSidebarComponentProps) {
 
   // Create base data that includes MCP category when available
   const baseData = useMemo(() => {
-    const mcpComponent = data[MCP_COMPONENT_CATEGORY]?.["MCPTools"];
+    const mcpComponent = rawData[MCP_COMPONENT_CATEGORY]?.["MCPTools"];
     const dataWithoutMcpTools = mcpComponent
       ? {
           ...data,
@@ -320,7 +325,7 @@ export function FlowSidebarComponent({ isLoading }: FlowSidebarComponentProps) {
       };
     }
     return dataWithoutMcpTools;
-  }, [data, mcpSuccess, mcpServers]);
+  }, [data, mcpSuccess, mcpServers, rawData]);
 
   const [dataFilter, setFilterData] = useState(baseData);
 
@@ -486,9 +491,9 @@ export function FlowSidebarComponent({ isLoading }: FlowSidebarComponentProps) {
     if (
       mcpSuccess &&
       mcpServers &&
-      data[MCP_COMPONENT_CATEGORY]?.["MCPTools"]
+      rawData[MCP_COMPONENT_CATEGORY]?.["MCPTools"]
     ) {
-      const mcpComponent = data[MCP_COMPONENT_CATEGORY]["MCPTools"];
+      const mcpComponent = rawData[MCP_COMPONENT_CATEGORY]["MCPTools"];
       const newMcpSearchData = mcpServers.map((mcpServer) => ({
         ...mcpComponent,
         mcpServerName: mcpServer.name, // adds this field and makes it searchable
@@ -509,7 +514,7 @@ export function FlowSidebarComponent({ isLoading }: FlowSidebarComponentProps) {
       setMcpSearchData([]);
     }
     setFuse(new Fuse(fuseData, options));
-  }, [baseData, mcpSuccess, mcpServers]);
+  }, [baseData, mcpSuccess, mcpServers, rawData]);
 
   useEffect(() => {
     if (getFilterEdge.length !== 0 || getFilterComponent !== "") {
@@ -685,7 +690,7 @@ export function FlowSidebarComponent({ isLoading }: FlowSidebarComponentProps) {
 
   const filterDescription =
     getFilterComponent !== ""
-      ? (baseData[category][component]?.display_name ?? "")
+      ? (baseData[category]?.[component]?.display_name ?? "")
       : (filterType?.type ?? "");
 
   const filterName =
@@ -749,7 +754,7 @@ export function FlowSidebarComponent({ isLoading }: FlowSidebarComponentProps) {
                 segmentedSidebar={ENABLE_NEW_SIDEBAR}
                 className="flex-1 group-data-[collapsible=icon]:hidden gutter-stable"
               >
-                {isLoading ? (
+                {isLoading || isComponentVisibilityLoading ? (
                   <div className="flex flex-col gap-2">
                     <div className="flex flex-col gap-1 p-3">
                       <SkeletonGroup count={13} className="my-0.5 h-7" />
@@ -862,7 +867,7 @@ export function FlowSidebarComponent({ isLoading }: FlowSidebarComponentProps) {
                   <SidebarMenuButtons
                     customComponent={customComponent}
                     addComponent={addComponent}
-                    isLoading={isLoading}
+                    isLoading={isLoading || isComponentVisibilityLoading}
                   />
                 </SidebarFooter>
               )}

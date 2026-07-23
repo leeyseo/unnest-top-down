@@ -24,6 +24,8 @@ from langflow.agentic.services.flow_types import LANGFLOW_ASSISTANT_FLOW
 from langflow.api.v1.flows import _new_flow, _save_flow_to_fs
 from langflow.initial_setup.setup import get_or_create_default_folder
 from langflow.services.database.models.flow.model import Flow, FlowCreate
+from langflow.services.database.models.user.model import User
+from langflow.services.database.models.user_component_visibility.crud import get_component_visibility
 from langflow.services.deps import get_storage_service
 
 if TYPE_CHECKING:
@@ -190,6 +192,9 @@ async def run_assistant_and_persist(
     )
     ctx = await _resolve_assistant_context(request, user_id, session)
 
+    user = await session.get(User, user_id)
+    visibility = None if user is None or user.is_superuser else await get_component_visibility(session, user_id)
+
     stream = execute_flow_with_validation_streaming(
         flow_filename=LANGFLOW_ASSISTANT_FLOW,
         input_value=instruction,
@@ -201,6 +206,8 @@ async def run_assistant_and_persist(
         model_name=ctx.model_name,
         api_key_var=ctx.api_key_name,
         apply_edits_immediately=True,
+        hidden_bundles=visibility.hidden_bundles if visibility else [],
+        hidden_components=visibility.hidden_components if visibility else [],
     )
     canvas, working_snapshot, result_text, error_text, field_edits = await _consume_stream(stream, flow.data)
 

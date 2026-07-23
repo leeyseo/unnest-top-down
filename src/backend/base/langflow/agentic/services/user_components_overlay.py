@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 from lfx.log.logger import logger
 
+from langflow.agentic.services.component_visibility_context import current_component_visibility
 from langflow.agentic.services.user_components import (
     MAX_COMPONENT_SOURCE_BYTES,
     get_user_components_dir,
@@ -138,6 +139,24 @@ def load_registry_for_current_user() -> dict[str, dict]:
     the base registry if no user is bound).
     """
     return load_registry_with_user_overlay(user_id=current_user_id())
+
+
+def load_visible_registry_for_current_user() -> dict[str, dict]:
+    """Return only built-ins the current user may discover, plus all user Components."""
+    registry = load_registry_for_current_user()
+    hidden_bundles, hidden_components = current_component_visibility()
+    if not hidden_bundles and not hidden_components:
+        return registry
+
+    return {
+        component_type: entry
+        for component_type, entry in registry.items()
+        if entry.get("custom") is True
+        or (
+            entry.get("category") not in hidden_bundles
+            and f"{entry.get('category')}.{component_type}" not in hidden_components
+        )
+    }
 
 
 def _build_overlay_entry(py_file: Path, base_template: dict) -> dict | None:

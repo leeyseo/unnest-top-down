@@ -14,7 +14,8 @@ from lfx.mcp.redact import is_sensitive_field
 from lfx.mcp.registry import describe_component, search_registry
 from lfx.schema import Data
 
-from ._state import _ensure_working_flow, _find_node, _load_registry_user_aware
+from ._state import _ensure_working_flow, _find_node
+from ._state import _load_visible_registry_user_aware as _load_registry_user_aware
 
 
 class SearchComponentTypes(Component):

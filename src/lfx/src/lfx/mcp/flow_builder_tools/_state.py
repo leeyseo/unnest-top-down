@@ -47,6 +47,17 @@ def _load_registry_user_aware() -> dict[str, dict]:
     return load_registry_for_current_user()
 
 
+def _load_visible_registry_user_aware() -> dict[str, dict]:
+    """Return the user-aware registry filtered for Component discovery."""
+    try:
+        from langflow.agentic.services.user_components_overlay import (
+            load_visible_registry_for_current_user,
+        )
+    except ImportError:
+        return load_local_registry()
+    return load_visible_registry_for_current_user()
+
+
 # ---------------------------------------------------------------------------
 # Per-request state using contextvars. Each async request gets its own
 # working flow, flow ID, and event queue -- safe under concurrency.
