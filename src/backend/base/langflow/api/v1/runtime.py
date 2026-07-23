@@ -90,6 +90,7 @@ from langflow.services.runtime_quota import RuntimeQuotaExceededError, get_runti
 from langflow.services.runtime_scheduler import next_cron_run
 from langflow.services.runtime_setup import (
     encrypt_runtime_secrets,
+    generate_age_recovery_key,
     load_or_create_master_key,
     master_key_fingerprint,
 )
@@ -1198,6 +1199,7 @@ async def complete_runtime_setup(
             detail="Runtime master key volume is unavailable",
         ) from exc
     secrets = {name: value.get_secret_value() for name, value in payload.secret_values.items()}
+    recovery_identity, backup_recipient = generate_age_recovery_key()
     admin = User(
         username=username,
         password=get_auth_service().get_password_hash(payload.admin_password.get_secret_value()),
@@ -1215,6 +1217,7 @@ async def complete_runtime_setup(
                 "storage_endpoint": str(payload.storage_endpoint) if payload.storage_endpoint else None,
                 "tls_certificate_configured": payload.tls_certificate_configured,
                 "secret_names": sorted(secrets),
+                "backup_recipient": backup_recipient,
             },
             encrypted_secrets=encrypt_runtime_secrets(key, secrets),
             master_key_fingerprint=master_key_fingerprint(key),
@@ -1237,7 +1240,9 @@ async def complete_runtime_setup(
             "tls_certificate_configured": payload.tls_certificate_configured,
         },
     )
-    return await runtime_setup_status(session)
+    result = await runtime_setup_status(session)
+    result["recovery_identity"] = recovery_identity
+    return result
 
 
 @router.get("/ready")

@@ -10,9 +10,62 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 if TYPE_CHECKING:
     from langflow.services.database.models.runtime_configuration import RuntimeConfiguration
+
+_BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+_BECH32_BITS = 5
+
+
+def _bech32_polymod(values: list[int]) -> int:
+    generators = (0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3)
+    checksum = 1
+    for value in values:
+        top = checksum >> 25
+        checksum = (checksum & 0x1FFFFFF) << 5 ^ value
+        for index, generator in enumerate(generators):
+            if (top >> index) & 1:
+                checksum ^= generator
+    return checksum
+
+
+def _bech32_encode(prefix: str, payload: bytes) -> str:
+    expanded = [ord(character) >> 5 for character in prefix]
+    expanded += [0]
+    expanded += [ord(character) & 31 for character in prefix]
+    accumulator = 0
+    bits = 0
+    values = []
+    for byte in payload:
+        accumulator = accumulator << 8 | byte
+        bits += 8
+        while bits >= _BECH32_BITS:
+            bits -= _BECH32_BITS
+            values.append((accumulator >> bits) & 31)
+    if bits:
+        values.append((accumulator << (_BECH32_BITS - bits)) & 31)
+    polymod = _bech32_polymod([*expanded, *values, 0, 0, 0, 0, 0, 0]) ^ 1
+    checksum = [(polymod >> (5 * (5 - index))) & 31 for index in range(6)]
+    return prefix + "1" + "".join(_BECH32_CHARSET[value] for value in [*values, *checksum])
+
+
+def generate_age_recovery_key() -> tuple[str, str]:
+    private_key = X25519PrivateKey.generate()
+    private_bytes = private_key.private_bytes(
+        serialization.Encoding.Raw,
+        serialization.PrivateFormat.Raw,
+        serialization.NoEncryption(),
+    )
+    public_bytes = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    identity = _bech32_encode("AGE-SECRET-KEY-", private_bytes).upper()
+    recipient = _bech32_encode("age", public_bytes)
+    return identity, recipient
 
 
 def master_key_path() -> Path:

@@ -82,9 +82,12 @@ async def test_runtime_setup_persists_encrypted_secrets_and_first_admin(
         await async_session.exec(select(User).where(User.username == "runtime-admin"))
     ).one()
     assert result["complete"] is True
+    assert result["recovery_identity"].startswith("AGE-SECRET-KEY-1")
     assert configuration is not None
     assert "top-secret" not in configuration.encrypted_secrets
     assert decrypt_runtime_secrets(configuration) == {"MODEL_TOKEN": "top-secret"}
+    assert configuration.settings["backup_recipient"].startswith("age1")
+    assert "AGE-SECRET-KEY-" not in str(configuration.settings)
     assert stat.S_IMODE(key_path.stat().st_mode) == 0o600
     assert admin.is_superuser is True
     assert admin.password == "hashed:strong-password"  # noqa: S105
