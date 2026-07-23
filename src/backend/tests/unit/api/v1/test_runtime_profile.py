@@ -3,7 +3,13 @@ from uuid import uuid4
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException, Request
-from langflow.api.v1.runtime import _contract_input, _contract_output, _immutable_agent_flow, _sandbox_payload
+from langflow.api.v1.runtime import (
+    _contract_input,
+    _contract_output,
+    _immutable_agent_flow,
+    _immutable_subflows,
+    _sandbox_payload,
+)
 from langflow.api.v1.schemas import RunResponse, SimplifiedAPIRequest
 from langflow.main import create_runtime_app
 from langflow.services.database.models.deployment_release import DeploymentRelease
@@ -72,6 +78,45 @@ async def test_runtime_executes_release_snapshot_not_editable_draft(async_sessio
 
     assert loaded_release.id == release.id
     assert immutable_flow.data == {"nodes": [{"id": "released"}], "edges": []}
+
+
+async def test_runtime_bundles_release_pinned_subflow_snapshot(async_session):
+    user = User(username="runtime-subflow-owner", password="unused", is_active=True)  # noqa: S106
+    agent = Flow(name="runtime-agent-root", user_id=user.id, data={"nodes": [], "edges": []})
+    subflow = Flow(
+        name="runtime-subflow",
+        user_id=user.id,
+        data={"nodes": [{"id": "draft"}], "edges": []},
+    )
+    agent_version = FlowVersion(
+        flow_id=agent.id,
+        user_id=user.id,
+        data={"nodes": [], "edges": []},
+        version_number=1,
+    )
+    subflow_version = FlowVersion(
+        flow_id=subflow.id,
+        user_id=user.id,
+        data={"nodes": [{"id": "released"}], "edges": []},
+        version_number=1,
+    )
+    release = DeploymentRelease(
+        user_id=user.id,
+        version="1.0.0",
+        agent_flow_version_id=agent_version.id,
+        ingestion_flow_version_id=agent_version.id,
+        subflow_version_ids=[str(subflow_version.id)],
+        config={},
+        manifest={},
+        api_version="v1",
+    )
+    async_session.add_all([user, agent, subflow, agent_version, subflow_version, release])
+    await async_session.flush()
+
+    bundled = await _immutable_subflows(async_session, release)
+
+    assert bundled[str(subflow.id)]["flow_version_id"] == str(subflow_version.id)
+    assert bundled[str(subflow.id)]["data"] == {"nodes": [{"id": "released"}], "edges": []}
 
 
 def test_runtime_applies_release_api_contract():
@@ -156,12 +201,20 @@ def test_sandbox_payload_preserves_whole_flow_boundary():
     payload = _sandbox_payload(
         release,
         flow,
+        {
+            "subflow-id": {
+                "id": "subflow-id",
+                "name": "released-subflow",
+                "data": {"nodes": [], "edges": []},
+            }
+        },
         SimplifiedAPIRequest(tweaks={"custom": {"input_value": "hello"}}),
         user,
     )
 
     assert payload["execution_boundary"] == "whole-flow"
     assert payload["flow"]["data"] == flow.data
+    assert payload["context"]["deployment_subflows"]["subflow-id"]["name"] == "released-subflow"
     assert payload["security"]["network"] == "deny-by-default"
     assert payload["security"]["allowed_endpoints"] == ["https://models.internal/v1"]
 
@@ -183,6 +236,7 @@ async def test_risky_release_dispatches_entire_flow_to_sandbox(monkeypatch):
     sandbox_run = AsyncMock(return_value="sandbox-stream")
     standard_run = AsyncMock()
     monkeypatch.setattr("langflow.api.v1.runtime._immutable_agent_flow", AsyncMock(return_value=(release, flow)))
+    monkeypatch.setattr("langflow.api.v1.runtime._immutable_subflows", AsyncMock(return_value={}))
     monkeypatch.setattr(
         "langflow.api.v1.runtime._contract_input",
         lambda *_args: SimplifiedAPIRequest(input_value="hello"),

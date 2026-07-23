@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Any
 
 from typing_extensions import override
@@ -27,6 +28,10 @@ class FlowToolComponent(LCToolComponent):
         flow_datas = await self.alist_flows()
         return [flow_data.data["name"] for flow_data in flow_datas]
 
+    def _flow_context(self) -> dict[str, Any]:
+        context = self.ctx
+        return dict(context) if isinstance(context, dict) else {}
+
     async def get_flow(self, flow_name: str) -> Data | None:
         """Retrieves a flow by its name.
 
@@ -36,6 +41,25 @@ class FlowToolComponent(LCToolComponent):
         Returns:
             Optional[Text]: The flow record if found, None otherwise.
         """
+        context = self._flow_context()
+        if "deployment_release_id" in context:
+            pinned = context.get("deployment_subflows", {})
+            if not isinstance(pinned, dict):
+                msg = "Release-pinned Subflow data is invalid"
+                raise TypeError(msg)
+            flow = next(
+                (
+                    candidate
+                    for candidate in pinned.values()
+                    if isinstance(candidate, dict) and candidate.get("name") == flow_name
+                ),
+                None,
+            )
+            if flow is None:
+                msg = f"Subflow '{flow_name}' is not pinned to this deployment release"
+                raise ValueError(msg)
+            return Data(data=deepcopy(flow))
+
         flow_datas = await self.alist_flows()
         for flow_data in flow_datas:
             if flow_data.data["name"] == flow_name:
@@ -88,6 +112,7 @@ class FlowToolComponent(LCToolComponent):
         graph = Graph.from_payload(
             flow_data.data["data"],
             user_id=str(self.user_id),
+            context=self._flow_context() or None,
         )
         try:
             graph.set_run_id(self.graph.run_id)

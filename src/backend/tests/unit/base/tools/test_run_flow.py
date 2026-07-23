@@ -124,6 +124,58 @@ class TestRunFlowBaseComponentFlowRetrieval:
             assert result.data == {}
 
     @pytest.mark.asyncio
+    async def test_get_flow_uses_release_pinned_subflow_without_database_lookup(self):
+        component = RunFlowBaseComponent()
+        flow_id = str(uuid4())
+        pinned = {
+            "id": flow_id,
+            "name": "released-subflow",
+            "data": {"nodes": [{"id": "released"}], "edges": []},
+        }
+        component._vertex = MagicMock()
+        component._vertex.graph.context = {
+            "deployment_release_id": str(uuid4()),
+            "deployment_subflows": {flow_id: pinned},
+        }
+
+        with patch("lfx.base.tools.run_flow.get_flow_by_id_or_name", new_callable=AsyncMock) as mock_get:
+            result = await component.get_flow(flow_id_selected=flow_id)
+
+        assert result.data == pinned
+        result.data["data"]["nodes"][0]["id"] = "mutated"
+        assert pinned["data"]["nodes"][0]["id"] == "released"
+        mock_get.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_get_graph_inherits_release_context_and_skips_shared_cache(self):
+        component = RunFlowBaseComponent()
+        flow_id = str(uuid4())
+        deployment_context = {
+            "deployment_release_id": str(uuid4()),
+            "deployment_subflows": {
+                flow_id: {
+                    "id": flow_id,
+                    "name": "released-subflow",
+                    "data": {"nodes": [], "edges": []},
+                }
+            },
+        }
+        component._vertex = MagicMock()
+        component._vertex.graph.context = deployment_context
+        component.cache_flow = True
+        mock_graph = MagicMock(spec=Graph)
+
+        with (
+            patch.object(component, "_flow_cache_call") as mock_cache,
+            patch("lfx.base.tools.run_flow.Graph.from_payload", return_value=mock_graph) as from_payload,
+        ):
+            result = await component.get_graph(flow_id_selected=flow_id)
+
+        assert result is mock_graph
+        mock_cache.assert_not_called()
+        assert from_payload.call_args.kwargs["context"] == deployment_context
+
+    @pytest.mark.asyncio
     async def test_get_graph_raises_error_without_id_or_name(self):
         """Test that get_graph raises ValueError when neither ID nor name is provided."""
         component = RunFlowBaseComponent()

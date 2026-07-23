@@ -1,4 +1,5 @@
 from collections import Counter
+from copy import deepcopy
 from datetime import datetime
 from types import MethodType  # near the imports
 from typing import TYPE_CHECKING, Any
@@ -127,8 +128,53 @@ class RunFlowBaseComponent(Component):
     ################################################################
     # Flow retrieval
     ################################################################
+    def _deployment_context(self) -> dict[str, Any]:
+        try:
+            context = self.ctx
+        except (AttributeError, ValueError):
+            return {}
+        return dict(context) if isinstance(context, dict) else {}
+
+    def _deployment_flow(
+        self,
+        *,
+        flow_name_selected: str | None,
+        flow_id_selected: str | None,
+    ) -> Data | None:
+        context = self._deployment_context()
+        if "deployment_release_id" not in context:
+            return None
+        pinned = context.get("deployment_subflows", {})
+        if not isinstance(pinned, dict):
+            msg = "Release-pinned Subflow data is invalid"
+            raise TypeError(msg)
+
+        flow = pinned.get(str(flow_id_selected)) if flow_id_selected else None
+        if flow is None and flow_name_selected:
+            flow = next(
+                (
+                    candidate
+                    for candidate in pinned.values()
+                    if isinstance(candidate, dict) and candidate.get("name") == flow_name_selected
+                ),
+                None,
+            )
+        if flow is None:
+            reference = flow_id_selected or flow_name_selected or "<empty>"
+            msg = f"Subflow '{reference}' is not pinned to this deployment release"
+            raise ValueError(msg)
+        if not isinstance(flow, dict):
+            msg = "Release-pinned Subflow data is invalid"
+            raise TypeError(msg)
+        return Data(data=deepcopy(flow))
+
     async def get_flow(self, flow_name_selected: str | None = None, flow_id_selected: str | None = None) -> Data:
         """Get a flow's data by name or id."""
+        if pinned := self._deployment_flow(
+            flow_name_selected=flow_name_selected,
+            flow_id_selected=flow_id_selected,
+        ):
+            return pinned
         flow = await get_flow_by_id_or_name(
             user_id=self.user_id,
             flow_id=flow_id_selected,
@@ -146,7 +192,13 @@ class RunFlowBaseComponent(Component):
         if not (flow_name_selected or flow_id_selected):
             msg = "Flow name or id is required"
             raise ValueError(msg)
-        if flow_id_selected and (flow := self._flow_cache_call("get", flow_id=flow_id_selected)):
+        deployment_context = self._deployment_context()
+        is_deployment = "deployment_release_id" in deployment_context
+        if (
+            not is_deployment
+            and flow_id_selected
+            and (flow := self._flow_cache_call("get", flow_id=flow_id_selected))
+        ):
             if self._is_cached_flow_up_to_date(flow, updated_at):
                 return flow
             self._flow_cache_call("delete", flow_id=flow_id_selected)  # stale, delete it
@@ -161,11 +213,13 @@ class RunFlowBaseComponent(Component):
             payload=flow.data.get("data", {}),
             flow_id=flow_id_selected,
             flow_name=flow_name_selected,
+            context=deployment_context or None,
         )
         graph.description = flow.data.get("description", None)
         graph.updated_at = flow.data.get("updated_at", None)
 
-        self._flow_cache_call("set", flow=graph)
+        if not is_deployment:
+            self._flow_cache_call("set", flow=graph)
 
         return graph
 

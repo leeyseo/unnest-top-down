@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from lfx.components.flow_controls.flow_tool import FlowToolComponent
@@ -135,6 +135,29 @@ class TestFlowToolComponent(ComponentTestBaseWithClient):
             result = await component.get_flow("Any Flow")
 
             assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_flow_uses_release_pinned_snapshot(self, component_class, default_kwargs):
+        component = await self.component_setup(component_class, default_kwargs)
+        pinned = {
+            "id": "subflow-id",
+            "name": "Target Flow",
+            "data": {"nodes": [{"id": "released"}], "edges": []},
+        }
+        component._vertex = MagicMock()
+        component._vertex.graph.context = {
+            "deployment_release_id": "release-id",
+            "deployment_subflows": {"subflow-id": pinned},
+        }
+
+        with patch.object(component, "alist_flows") as list_flows:
+            result = await component.get_flow("Target Flow")
+
+        assert result is not None
+        assert result.data == pinned
+        result.data["data"]["nodes"][0]["id"] = "mutated"
+        assert pinned["data"]["nodes"][0]["id"] == "released"
+        list_flows.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_update_build_config_flow_name(self, component_class, default_kwargs):

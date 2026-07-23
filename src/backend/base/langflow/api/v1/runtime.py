@@ -191,6 +191,37 @@ async def _immutable_agent_flow(
     return release, immutable
 
 
+async def _immutable_subflows(
+    session: DbSessionReadOnly,
+    release: DeploymentRelease,
+) -> dict[str, dict[str, Any]]:
+    subflows: dict[str, dict[str, Any]] = {}
+    for raw_version_id in release.subflow_version_ids:
+        try:
+            version_id = UUID(str(raw_version_id))
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Release-pinned Subflow Version is invalid",
+            ) from exc
+        version = await session.get(FlowVersion, version_id)
+        flow = await session.get(Flow, version.flow_id) if version is not None else None
+        if version is None or flow is None or not isinstance(version.data, dict):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Release-pinned Subflow Version is unavailable",
+            )
+        subflows[str(flow.id)] = {
+            "id": str(flow.id),
+            "name": flow.name,
+            "description": version.description or flow.description,
+            "updated_at": version.created_at.isoformat() if version.created_at else None,
+            "flow_version_id": str(version.id),
+            "data": copy.deepcopy(version.data),
+        }
+    return subflows
+
+
 async def _runtime_knowledge_base(
     session: DbSession | DbSessionReadOnly,
 ) -> tuple[DeploymentRelease, KnowledgeBaseRecord]:
@@ -399,6 +430,7 @@ async def _execute_runtime_ingestion(
             immutable = FlowRead.model_validate(flow, from_attributes=True).model_copy(
                 update={"data": copy.deepcopy(ingestion_version.data)}
             )
+            subflows = await _immutable_subflows(session, release)
             request = SimplifiedAPIRequest(
                 output_type="any",
                 tweaks={
@@ -412,7 +444,15 @@ async def _execute_runtime_ingestion(
                 },
             )
         await job_service.update_job_metadata(job_id, {"stage": "ingesting", "progress": 50})
-        await simple_run_flow(flow=immutable, input_request=request, api_key_user=user)
+        await simple_run_flow(
+            flow=immutable,
+            input_request=request,
+            api_key_user=user,
+            context={
+                "deployment_release_id": str(release_id),
+                "deployment_subflows": subflows,
+            },
+        )
         async with session_scope() as session:
             await activate_document_version(session, document_id=document_id, version_id=version_id)
         await job_service.update_job_metadata(job_id, {"stage": "completed", "progress": 100})
@@ -543,6 +583,7 @@ def _contract_output(release: DeploymentRelease, result: RunResponse) -> dict[st
 def _sandbox_payload(
     release: DeploymentRelease,
     flow: FlowRead,
+    subflows: dict[str, dict[str, Any]],
     input_request: SimplifiedAPIRequest,
     current_user: User,
 ) -> dict[str, Any]:
@@ -555,6 +596,10 @@ def _sandbox_payload(
             "id": str(flow.id),
             "name": flow.name,
             "data": copy.deepcopy(flow.data),
+        },
+        "context": {
+            "deployment_release_id": str(release.id),
+            "deployment_subflows": copy.deepcopy(subflows),
         },
         "request": input_request.model_dump(mode="json"),
         "security": {
@@ -576,6 +621,7 @@ async def _run_in_sandbox(
     *,
     release: DeploymentRelease,
     flow: FlowRead,
+    subflows: dict[str, dict[str, Any]],
     input_request: SimplifiedAPIRequest,
     current_user: User,
     stream: bool,
@@ -584,7 +630,7 @@ async def _run_in_sandbox(
         client = SandboxWorkerClient.from_env()
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    payload = _sandbox_payload(release, flow, input_request, current_user)
+    payload = _sandbox_payload(release, flow, subflows, input_request, current_user)
     try:
         if stream:
             response = await client.stream(payload)
@@ -611,11 +657,13 @@ async def _run_agent(
     http_request: Request,
 ):
     release, flow = await _immutable_agent_flow(session, api_version)
+    subflows = await _immutable_subflows(session, release)
     input_request = _contract_input(release, payload)
     if release.manifest.get("sandbox", {}).get("required") is True:
         result = await _run_in_sandbox(
             release=release,
             flow=flow,
+            subflows=subflows,
             input_request=input_request,
             current_user=current_user,
             stream=stream,
@@ -631,7 +679,10 @@ async def _run_agent(
         input_request=input_request,
         stream=stream,
         api_key_user=current_user,
-        context={"deployment_release_id": str(release.id)},
+        context={
+            "deployment_release_id": str(release.id),
+            "deployment_subflows": subflows,
+        },
         http_request=http_request,
     )
     if stream:
