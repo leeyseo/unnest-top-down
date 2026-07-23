@@ -14,6 +14,7 @@ import { useGetProviderAccounts } from "@/controllers/API/queries/deployment-pro
 import { useGetDeploymentsByProviders } from "@/controllers/API/queries/deployments/use-get-deployments-by-providers";
 import { useFolderStore } from "@/stores/foldersStore";
 import DeploymentsContent from "./components/deployments-content";
+import OnPremExportModal from "./components/on-prem-export-modal";
 import ProvidersContent from "./components/providers-content";
 import SubTabToggle, {
   type DeploymentSubTab,
@@ -61,6 +62,7 @@ export default function DeploymentsPage() {
   const [activeSubTab, setActiveSubTab] =
     useState<DeploymentSubTab>("deployments");
   const [stepperOpen, setStepperOpen] = useState(false);
+  const [onPremExportOpen, setOnPremExportOpen] = useState(false);
   const [addProviderOpen, setAddProviderOpen] = useState(false);
 
   const { data: providersData, isLoading: isLoadingProviders } =
@@ -95,25 +97,37 @@ export default function DeploymentsPage() {
     <div className="flex flex-col gap-10 pt-4">
       <div className="flex min-h-10 items-center justify-between">
         <SubTabToggle activeTab={activeSubTab} onTabChange={setActiveSubTab} />
-        {showHeaderButton && (
-          <Button
-            onClick={() =>
-              activeSubTab === "providers"
-                ? setAddProviderOpen(true)
-                : setStepperOpen(true)
-            }
-            data-testid={
-              activeSubTab === "providers"
-                ? "new-provider-btn"
-                : "new-deployment-btn"
-            }
-          >
-            <ForwardedIconComponent name="Plus" className="h-4 w-4" />
-            {activeSubTab === "providers"
-              ? t("deployments.newEnvironment")
-              : t("deployments.newDeployment")}
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {activeSubTab === "deployments" && (
+            <Button
+              variant="outline"
+              onClick={() => setOnPremExportOpen(true)}
+              data-testid="export-on-prem-btn"
+            >
+              <ForwardedIconComponent name="Package" className="h-4 w-4" />
+              Export on-prem
+            </Button>
+          )}
+          {showHeaderButton && (
+            <Button
+              onClick={() =>
+                activeSubTab === "providers"
+                  ? setAddProviderOpen(true)
+                  : setStepperOpen(true)
+              }
+              data-testid={
+                activeSubTab === "providers"
+                  ? "new-provider-btn"
+                  : "new-deployment-btn"
+              }
+            >
+              <ForwardedIconComponent name="Plus" className="h-4 w-4" />
+              {activeSubTab === "providers"
+                ? t("deployments.newEnvironment")
+                : t("deployments.newDeployment")}
+            </Button>
+          )}
+        </div>
       </div>
 
       {showEnvironmentToolbar && activeSubTab === "deployments" && (
@@ -149,6 +163,11 @@ export default function DeploymentsPage() {
           setAddProviderOpen={setAddProviderOpen}
         />
       )}
+
+      <OnPremExportModal
+        open={onPremExportOpen}
+        setOpen={setOnPremExportOpen}
+      />
     </div>
   );
 }
