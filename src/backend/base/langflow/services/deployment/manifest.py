@@ -529,6 +529,11 @@ async def analyze_release(
         sandbox = sandbox or flow_sandbox
 
     api_version = next_api_version(previous_manifest, api.input_schema, api.output_schema)
+    orchestrator_files = (
+        ["compose/compose.yml"]
+        if config.orchestrator == "compose"
+        else ["helm/unnest/Chart.yaml", "helm/unnest/values.yaml"]
+    )
     manifest = {
         "schema_version": 1,
         "provider": "unnest-on-prem",
@@ -577,6 +582,31 @@ async def analyze_release(
             "sbom_required": True,
             "checksums_required": True,
             "signing_enabled": config.features.signing,
+            "unnestctl_targets": ["linux-amd64", "linux-arm64"],
+        },
+        "package": {
+            "layout_version": 1,
+            "required_files": [
+                "manifest/release.json",
+                "openapi/openapi.json",
+                "reports/sbom.cdx.json",
+                "reports/trivy.json",
+                "bin/unnestctl-amd64",
+                "bin/unnestctl-arm64",
+                "license/license.json",
+                "license/license.sig",
+                "keys/license.pub",
+                *orchestrator_files,
+                *(
+                    [
+                        "signatures/release-manifest.sig",
+                        "keys/cosign.pub",
+                    ]
+                    if config.features.signing
+                    else []
+                ),
+            ],
+            "required_globs": ["images/*.tar"],
         },
     }
     return ReleaseAnalysis(

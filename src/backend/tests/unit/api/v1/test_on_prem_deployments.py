@@ -135,6 +135,7 @@ async def test_create_on_prem_release_from_saved_versions(
     assert body["manifest"]["secret_names"] == []
     assert body["manifest"]["api"]["input_mapping"]["message"]["component_id"] == "agent-input"
     assert body["manifest"]["build"]["sbom_required"] is True
+    assert body["manifest"]["build"]["unnestctl_targets"] == ["linux-amd64", "linux-arm64"]
     builds = await client.get(
         f"/api/v1/deployments/on-prem/releases/{body['id']}/builds",
         headers=logged_in_headers,

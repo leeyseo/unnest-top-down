@@ -550,3 +550,4 @@ all = [
 
 [project.scripts]
 langflow-base = "langflow.langflow_launcher:main"
+unnestctl = "langflow.unnestctl:main"
