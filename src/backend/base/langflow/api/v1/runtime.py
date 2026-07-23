@@ -25,7 +25,7 @@ import filetype
 import httpx
 from anyio import Path as AsyncPath
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, Form, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from jsonschema import Draft202012Validator
 from lfx.log.logger import logger
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -55,6 +55,7 @@ from langflow.services.database.models.user.model import User
 from langflow.services.deployment import SandboxWorkerClient
 from langflow.services.deps import (
     get_auth_service,
+    get_db_service,
     get_job_service,
     get_queue_service,
     get_settings_service,
@@ -66,6 +67,16 @@ from langflow.services.runtime_audit import (
     append_runtime_audit_event,
     create_runtime_audit_checkpoint,
     verify_runtime_audit_chain,
+)
+from langflow.services.runtime_backup import (
+    RuntimeBackupError,
+    RuntimeBackupFile,
+    RuntimeBackupResult,
+    create_runtime_backup,
+    list_runtime_backups,
+    runtime_backup_path,
+    runtime_backup_result,
+    verify_runtime_backup,
 )
 from langflow.services.runtime_document import (
     DuplicateStrategy,
@@ -93,6 +104,7 @@ from langflow.services.runtime_setup import (
     generate_age_recovery_key,
     load_or_create_master_key,
     master_key_fingerprint,
+    master_key_path,
 )
 from langflow.services.storage.service import StorageService
 
@@ -182,6 +194,17 @@ class RuntimeUserRead(BaseModel):
     last_login_at: datetime | None
 
 
+class RuntimeBackupRead(BaseModel):
+    id: str
+    checksum: str
+    size_bytes: int
+    created_at: datetime
+
+
+class RuntimeBackupVerifyRequest(BaseModel):
+    recovery_identity: SecretStr = Field(min_length=70, max_length=200)
+
+
 class RuntimeSetupRequest(BaseModel):
     admin_username: str = Field(min_length=1, max_length=255)
     admin_password: SecretStr = Field(min_length=12)
@@ -207,6 +230,15 @@ def _runtime_user_read(user: User) -> RuntimeUserRead:
         is_active=user.is_active,
         created_at=user.create_at,
         last_login_at=user.last_login_at,
+    )
+
+
+def _runtime_backup_read(backup: RuntimeBackupResult) -> RuntimeBackupRead:
+    return RuntimeBackupRead(
+        id=backup.id,
+        checksum=backup.checksum,
+        size_bytes=backup.size_bytes,
+        created_at=backup.created_at,
     )
 
 
@@ -1512,6 +1544,152 @@ async def delete_runtime_user(
         resource_id=str(user.id),
         details={"username": username},
     )
+
+
+async def _runtime_backup_files(session: DbSessionReadOnly) -> list[RuntimeBackupFile]:
+    versions = (await session.exec(select(DocumentVersion).order_by(col(DocumentVersion.created_at)))).all()
+    if not versions:
+        return []
+    storage = get_storage_service()
+    files = []
+    for version in versions:
+        try:
+            namespace, storage_name = version.storage_path.split("/", 1)
+            contents = await storage.get_file(namespace, storage_name)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Runtime document {version.id} is unavailable for backup",
+            ) from exc
+        files.append(
+            RuntimeBackupFile(
+                archive_path=f"documents/{version.id}/raw",
+                contents=contents,
+            )
+        )
+    return files
+
+
+def _runtime_license_files() -> list[Path]:
+    return [
+        Path(os.getenv("UNNEST_LICENSE_FILE", "/opt/unnest/license/license.json")),
+        Path(os.getenv("UNNEST_LICENSE_SIGNATURE", "/opt/unnest/license/license.sig")),
+        Path(os.getenv("UNNEST_LICENSE_PUBLIC_KEY", "/opt/unnest/keys/license.pub")),
+    ]
+
+
+@router.get("/api/v1/admin/backups")
+async def list_backups(
+    _admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> list[RuntimeBackupRead]:
+    try:
+        backups = await asyncio.to_thread(list_runtime_backups)
+    except (OSError, RuntimeBackupError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Runtime backup storage is unavailable",
+        ) from exc
+    return [_runtime_backup_read(backup) for backup in backups]
+
+
+@router.post("/api/v1/admin/backups", status_code=status.HTTP_201_CREATED)
+async def create_backup(
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> RuntimeBackupRead:
+    configuration = await session.get(RuntimeConfiguration, 1)
+    release = await _latest_runtime_release(session)
+    recipient = configuration.settings.get("backup_recipient") if configuration else None
+    if not isinstance(recipient, str) or release is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Runtime backup recovery recipient or release is unavailable",
+        )
+    files = await _runtime_backup_files(session)
+    try:
+        result = await asyncio.to_thread(
+            create_runtime_backup,
+            database_url=get_db_service().database_url,
+            recipient=recipient,
+            master_key=master_key_path(),
+            files=files,
+            release_version=release.version,
+            license_files=_runtime_license_files(),
+        )
+    except (OSError, RuntimeBackupError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Runtime backup creation failed",
+        ) from exc
+    await append_runtime_audit_event(
+        session,
+        event_type="backup.created",
+        actor_user_id=admin.id,
+        resource_type="runtime_backup",
+        resource_id=result.id,
+        details={
+            "checksum": result.checksum,
+            "size_bytes": result.size_bytes,
+            "release_version": release.version,
+        },
+    )
+    return _runtime_backup_read(result)
+
+
+@router.get("/api/v1/admin/backups/{backup_id}/download")
+async def download_backup(
+    backup_id: UUID,
+    _admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> FileResponse:
+    try:
+        result = await asyncio.to_thread(runtime_backup_result, runtime_backup_path(str(backup_id)))
+    except (OSError, RuntimeBackupError) as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Runtime backup not found") from exc
+    return FileResponse(
+        result.path,
+        media_type="application/octet-stream",
+        filename=result.path.name,
+        headers={"X-Checksum-SHA256": result.checksum},
+    )
+
+
+@router.post("/api/v1/admin/backups/{backup_id}/verify")
+async def verify_backup(
+    backup_id: UUID,
+    payload: RuntimeBackupVerifyRequest,
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> dict[str, Any]:
+    path = runtime_backup_path(str(backup_id))
+    try:
+        manifest = await asyncio.to_thread(
+            verify_runtime_backup,
+            path,
+            payload.recovery_identity.get_secret_value(),
+        )
+    except (OSError, RuntimeBackupError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Runtime backup recovery identity or integrity check failed",
+        ) from exc
+    await append_runtime_audit_event(
+        session,
+        event_type="backup.verified",
+        actor_user_id=admin.id,
+        resource_type="runtime_backup",
+        resource_id=str(backup_id),
+        details={
+            "release_version": manifest.get("release_version"),
+            "created_at": manifest.get("created_at"),
+        },
+    )
+    return {
+        "valid": True,
+        "backup_id": manifest["backup_id"],
+        "release_version": manifest["release_version"],
+        "created_at": manifest["created_at"],
+        "database_format": manifest["database_format"],
+    }
 
 
 @router.get("/api/v1/admin/audit")

@@ -9,15 +9,26 @@ import stat
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from cryptography.exceptions import InvalidTag
 from cryptography.fernet import Fernet, InvalidToken
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 if TYPE_CHECKING:
     from langflow.services.database.models.runtime_configuration import RuntimeConfiguration
 
 _BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 _BECH32_BITS = 5
+_BECH32_CHECKSUM_VALUES = 6
+_BYTE_BITS = 8
+_X25519_KEY_BYTES = 32
+_BACKUP_MAGIC = b"UNNEST-X25519-AES256-GCM\x00\x01"
+_BACKUP_SALT_BYTES = 16
+_BACKUP_NONCE_BYTES = 12
+_BACKUP_TAG_BYTES = 16
+_BACKUP_BUFFER_BYTES = 1024 * 1024
 
 
 def _bech32_polymod(values: list[int]) -> int:
@@ -52,6 +63,50 @@ def _bech32_encode(prefix: str, payload: bytes) -> str:
     return prefix + "1" + "".join(_BECH32_CHARSET[value] for value in [*values, *checksum])
 
 
+def _bech32_decode(value: str, expected_prefix: str) -> bytes:
+    normalized = value.strip().lower()
+    separator = normalized.rfind("1")
+    if separator <= 0 or normalized[:separator] != expected_prefix.lower():
+        msg = f"Invalid {expected_prefix} recovery key"
+        raise ValueError(msg)
+    try:
+        values = [_BECH32_CHARSET.index(character) for character in normalized[separator + 1 :]]
+    except ValueError as exc:
+        msg = f"Invalid {expected_prefix} recovery key"
+        raise ValueError(msg) from exc
+    if len(values) < _BECH32_CHECKSUM_VALUES + 1:
+        msg = f"Invalid {expected_prefix} recovery key"
+        raise ValueError(msg)
+    prefix = normalized[:separator]
+
+    def expanded_prefix(candidate: str) -> list[int]:
+        return [
+            *(ord(character) >> 5 for character in candidate),
+            0,
+            *(ord(character) & 31 for character in candidate),
+        ]
+
+    valid_checksum = _bech32_polymod([*expanded_prefix(prefix), *values]) == 1
+    legacy_uppercase_checksum = _bech32_polymod([*expanded_prefix(prefix.upper()), *values]) == 1
+    if not valid_checksum and not legacy_uppercase_checksum:
+        msg = f"Invalid {expected_prefix} recovery key checksum"
+        raise ValueError(msg)
+
+    accumulator = 0
+    bits = 0
+    payload = bytearray()
+    for item in values[:-_BECH32_CHECKSUM_VALUES]:
+        accumulator = accumulator << _BECH32_BITS | item
+        bits += _BECH32_BITS
+        while bits >= _BYTE_BITS:
+            bits -= _BYTE_BITS
+            payload.append((accumulator >> bits) & 0xFF)
+    if bits and accumulator & ((1 << bits) - 1):
+        msg = f"Invalid {expected_prefix} recovery key padding"
+        raise ValueError(msg)
+    return bytes(payload)
+
+
 def generate_age_recovery_key() -> tuple[str, str]:
     private_key = X25519PrivateKey.generate()
     private_bytes = private_key.private_bytes(
@@ -63,9 +118,113 @@ def generate_age_recovery_key() -> tuple[str, str]:
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
     )
-    identity = _bech32_encode("AGE-SECRET-KEY-", private_bytes).upper()
+    identity = _bech32_encode("age-secret-key-", private_bytes).upper()
     recipient = _bech32_encode("age", public_bytes)
     return identity, recipient
+
+
+def _backup_key(private_or_public_key: bytes, ephemeral_or_recipient_key: bytes, salt: bytes) -> bytes:
+    private_key = X25519PrivateKey.from_private_bytes(private_or_public_key)
+    public_key = X25519PublicKey.from_public_bytes(ephemeral_or_recipient_key)
+    shared_key = private_key.exchange(public_key)
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=b"unnest-runtime-backup-v1",
+    ).derive(shared_key)
+
+
+def encrypt_runtime_backup(source: Path, destination: Path, recipient: str) -> None:
+    recipient_key = _bech32_decode(recipient, "age")
+    if len(recipient_key) != _X25519_KEY_BYTES:
+        msg = "Invalid age recovery recipient length"
+        raise ValueError(msg)
+    ephemeral = X25519PrivateKey.generate()
+    ephemeral_public = ephemeral.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    salt = os.urandom(_BACKUP_SALT_BYTES)
+    nonce = os.urandom(_BACKUP_NONCE_BYTES)
+    header = _BACKUP_MAGIC + ephemeral_public + salt + nonce
+    recipient_public = X25519PublicKey.from_public_bytes(recipient_key)
+    shared_key = ephemeral.exchange(recipient_public)
+    key = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=salt,
+        info=b"unnest-runtime-backup-v1",
+    ).derive(shared_key)
+    encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
+    encryptor.authenticate_additional_data(header)
+
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with source.open("rb") as source_file, os.fdopen(descriptor, "wb") as destination_file:
+            destination_file.write(header)
+            while chunk := source_file.read(_BACKUP_BUFFER_BYTES):
+                destination_file.write(encryptor.update(chunk))
+            destination_file.write(encryptor.finalize())
+            destination_file.write(encryptor.tag)
+            destination_file.flush()
+            os.fsync(destination_file.fileno())
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
+
+
+def decrypt_runtime_backup(source: Path, destination: Path, identity: str) -> None:
+    identity_key = _bech32_decode(identity, "age-secret-key-")
+    if len(identity_key) != _X25519_KEY_BYTES:
+        msg = "Invalid age recovery identity length"
+        raise ValueError(msg)
+    header_size = len(_BACKUP_MAGIC) + _X25519_KEY_BYTES + _BACKUP_SALT_BYTES + _BACKUP_NONCE_BYTES
+    source_size = source.stat().st_size
+    if source_size <= header_size + _BACKUP_TAG_BYTES:
+        msg = "Runtime backup is truncated"
+        raise ValueError(msg)
+
+    with source.open("rb") as source_file:
+        header = source_file.read(header_size)
+        if not header.startswith(_BACKUP_MAGIC):
+            msg = "Runtime backup format is invalid"
+            raise ValueError(msg)
+        offset = len(_BACKUP_MAGIC)
+        ephemeral_public = header[offset : offset + _X25519_KEY_BYTES]
+        offset += _X25519_KEY_BYTES
+        salt = header[offset : offset + _BACKUP_SALT_BYTES]
+        nonce = header[-_BACKUP_NONCE_BYTES:]
+        source_file.seek(-_BACKUP_TAG_BYTES, os.SEEK_END)
+        tag = source_file.read(_BACKUP_TAG_BYTES)
+        source_file.seek(header_size)
+        remaining = source_size - header_size - _BACKUP_TAG_BYTES
+
+        key = _backup_key(identity_key, ephemeral_public, salt)
+        decryptor = Cipher(algorithms.AES(key), modes.GCM(nonce, tag)).decryptor()
+        decryptor.authenticate_additional_data(header)
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as destination_file:
+                while remaining:
+                    chunk = source_file.read(min(_BACKUP_BUFFER_BYTES, remaining))
+                    if not chunk:
+                        msg = "Runtime backup is truncated"
+                        raise ValueError(msg)
+                    remaining -= len(chunk)
+                    destination_file.write(decryptor.update(chunk))
+                destination_file.write(decryptor.finalize())
+                destination_file.flush()
+                os.fsync(destination_file.fileno())
+        except InvalidTag as exc:
+            destination.unlink(missing_ok=True)
+            msg = "Runtime backup recovery identity or integrity check failed"
+            raise ValueError(msg) from exc
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
 
 
 def master_key_path() -> Path:

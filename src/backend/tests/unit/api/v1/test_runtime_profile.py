@@ -50,6 +50,9 @@ def test_runtime_profile_mounts_only_deployment_routes(monkeypatch):
     assert "/api/v1/admin/api-keys" in paths
     assert "/api/v1/admin/users" in paths
     assert "/api/v1/admin/users/{user_id}" in paths
+    assert "/api/v1/admin/backups" in paths
+    assert "/api/v1/admin/backups/{backup_id}/download" in paths
+    assert "/api/v1/admin/backups/{backup_id}/verify" in paths
     assert "/api/v1/admin/audit" in paths
     assert "/api/v1/admin/audit/checkpoints" in paths
     assert "/api/v1/admin/license" in paths
