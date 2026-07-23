@@ -132,6 +132,20 @@ class OnPremDeploymentConfig(BaseModel):
         return self
 
 
+class AgentInputBinding(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    component_id: str = Field(min_length=1)
+    component_field: str = Field(min_length=1)
+
+
+class AgentOutputBinding(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    component_id: str = Field(min_length=1)
+    result_path: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$")
+
+
 class AgentApiContract(BaseModel):
     model_config = {"extra": "forbid"}
 
@@ -139,6 +153,8 @@ class AgentApiContract(BaseModel):
     output_schema: dict[str, Any]
     request_example: dict[str, Any]
     response_example: Any
+    input_mapping: dict[str, AgentInputBinding]
+    output_mapping: dict[str, AgentOutputBinding]
 
 
 class AcceptanceTestCreate(BaseModel):

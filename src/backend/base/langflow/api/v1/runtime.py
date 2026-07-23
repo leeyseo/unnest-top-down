@@ -14,19 +14,20 @@ from contextlib import suppress
 from http import HTTPStatus
 from pathlib import Path
 from struct import pack
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 import filetype
 from anyio import Path as AsyncPath
-from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
+from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 from sqlmodel import col, select
 
 from langflow.api.utils import CurrentActiveUser, DbSession, DbSessionReadOnly, build_content_disposition
 from langflow.api.v1.endpoints import _run_flow_internal, simple_run_flow
-from langflow.api.v1.schemas import SimplifiedAPIRequest
+from langflow.api.v1.schemas import RunResponse, SimplifiedAPIRequest
 from langflow.services.auth.utils import get_current_active_superuser, get_current_active_user
 from langflow.services.database.models.deployment_release import DeploymentRelease
 from langflow.services.database.models.flow.model import Flow, FlowRead
@@ -378,20 +379,107 @@ async def _schedule_runtime_ingestion(
     await get_job_service().update_job_metadata(job_id, {"task_id": task_id})
 
 
+def _schema_error(schema: dict[str, Any], value: Any) -> str | None:
+    error = next(iter(Draft202012Validator(schema).iter_errors(value)), None)
+    if error is None:
+        return None
+    location = "/".join(str(part) for part in error.path) or "<root>"
+    return f"{location}: {error.message}"
+
+
+def _contract_input(release: DeploymentRelease, payload: dict[str, Any]) -> SimplifiedAPIRequest:
+    contract = release.manifest.get("api", {})
+    schema = contract.get("input_schema")
+    mappings = contract.get("input_mapping")
+    if not isinstance(schema, dict) or not isinstance(mappings, dict):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Release API input contract is unavailable",
+        )
+    if error := _schema_error(schema, payload):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Request does not match the release API schema at {error}",
+        )
+
+    tweaks: dict[str, dict[str, Any]] = {}
+    for field_name, binding in mappings.items():
+        if field_name not in payload or not isinstance(binding, dict):
+            continue
+        component_id = binding.get("component_id")
+        component_field = binding.get("component_field")
+        if not isinstance(component_id, str) or not isinstance(component_field, str):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Release API input mapping is invalid",
+            )
+        tweaks.setdefault(component_id, {})[component_field] = payload[field_name]
+    return SimplifiedAPIRequest(output_type="any", tweaks=tweaks)
+
+
+def _mapped_result(result: dict[str, Any], component_id: str, path: str) -> Any:
+    for run_output in result.get("outputs") or []:
+        for component_output in run_output.get("outputs") or []:
+            if component_output.get("component_id") != component_id:
+                continue
+            value: Any = component_output.get("results")
+            for part in path.split("."):
+                if not isinstance(value, dict) or part not in value:
+                    raise KeyError(path)
+                value = value[part]
+            return value
+    raise KeyError(component_id)
+
+
+def _contract_output(release: DeploymentRelease, result: RunResponse) -> dict[str, Any]:
+    contract = release.manifest.get("api", {})
+    schema = contract.get("output_schema")
+    mappings = contract.get("output_mapping")
+    if not isinstance(schema, dict) or not isinstance(mappings, dict):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Release API output contract is unavailable",
+        )
+
+    serialized = result.model_dump(mode="json")
+    response: dict[str, Any] = {}
+    for field_name, binding in mappings.items():
+        if not isinstance(binding, dict):
+            continue
+        component_id = binding.get("component_id")
+        result_path = binding.get("result_path")
+        if not isinstance(component_id, str) or not isinstance(result_path, str):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Release API output mapping is invalid",
+            )
+        try:
+            response[field_name] = _mapped_result(serialized, component_id, result_path)
+        except KeyError:
+            continue
+    if error := _schema_error(schema, response):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Agent result does not match the release API schema at {error}",
+        )
+    return response
+
+
 async def _run_agent(
     *,
     api_version: str,
     stream: bool,
     background_tasks: BackgroundTasks,
-    input_request: SimplifiedAPIRequest | None,
+    payload: dict[str, Any],
     current_user: User,
     session: DbSessionReadOnly,
     http_request: Request,
 ):
     release, flow = await _immutable_agent_flow(session, api_version)
+    input_request = _contract_input(release, payload)
     # The route accepts no flow identifier: successful authentication grants
     # execution only of the release-pinned Agent version.
-    return await _run_flow_internal(
+    result = await _run_flow_internal(
         background_tasks=background_tasks,
         flow=flow,
         input_request=input_request,
@@ -400,6 +488,11 @@ async def _run_agent(
         context={"deployment_release_id": str(release.id)},
         http_request=http_request,
     )
+    if stream:
+        return result
+    if not isinstance(result, RunResponse):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Agent returned an invalid response")
+    return _contract_output(release, result)
 
 
 @router.get("/ready")
@@ -411,17 +504,17 @@ async def ready(session: DbSessionReadOnly) -> dict[str, str]:
 @router.post("/api/{api_version}/agent/run", response_model=None)
 async def run_agent(
     api_version: str,
+    payload: Annotated[dict[str, Any], Body()],
     background_tasks: BackgroundTasks,
     current_user: CurrentActiveUser,
     session: DbSessionReadOnly,
     http_request: Request,
-    input_request: SimplifiedAPIRequest | None = None,
 ):
     return await _run_agent(
         api_version=api_version,
         stream=False,
         background_tasks=background_tasks,
-        input_request=input_request,
+        payload=payload,
         current_user=current_user,
         session=session,
         http_request=http_request,
@@ -431,17 +524,17 @@ async def run_agent(
 @router.post("/api/{api_version}/agent/stream", response_model=None)
 async def stream_agent(
     api_version: str,
+    payload: Annotated[dict[str, Any], Body()],
     background_tasks: BackgroundTasks,
     current_user: CurrentActiveUser,
     session: DbSessionReadOnly,
     http_request: Request,
-    input_request: SimplifiedAPIRequest | None = None,
 ):
     return await _run_agent(
         api_version=api_version,
         stream=True,
         background_tasks=background_tasks,
-        input_request=input_request,
+        payload=payload,
         current_user=current_user,
         session=session,
         http_request=http_request,
@@ -452,17 +545,17 @@ async def stream_agent(
 async def run_webhook(
     api_version: str,
     name: str,  # noqa: ARG001 - named hooks share the release-pinned Agent
+    payload: Annotated[dict[str, Any], Body()],
     background_tasks: BackgroundTasks,
     current_user: CurrentActiveUser,
     session: DbSessionReadOnly,
     http_request: Request,
-    input_request: SimplifiedAPIRequest | None = None,
 ):
     return await _run_agent(
         api_version=api_version,
         stream=False,
         background_tasks=background_tasks,
-        input_request=input_request,
+        payload=payload,
         current_user=current_user,
         session=session,
         http_request=http_request,

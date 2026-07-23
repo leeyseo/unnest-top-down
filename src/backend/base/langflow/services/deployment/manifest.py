@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse, urlunparse
 from uuid import UUID
 
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from lfx.utils.flow_requirements import generate_requirements_from_flow
 from sqlalchemy import or_
 from sqlmodel import col, select
@@ -76,27 +78,26 @@ def _field_value(template: dict[str, Any], field_name: str) -> Any:
 
 
 def _validate_json_schema(schema: dict[str, Any], name: str) -> list[str]:
-    errors: list[str] = []
     if schema.get("type") != "object":
         return [f"{name} must be a JSON Schema object"]
-    properties = schema.get("properties")
-    if not isinstance(properties, dict):
-        errors.append(f"{name}.properties must be an object")
-        properties = {}
-    required = schema.get("required", [])
-    if not isinstance(required, list) or not all(isinstance(value, str) for value in required):
-        errors.append(f"{name}.required must be a list of field names")
-    elif missing := sorted(set(required).difference(properties)):
-        errors.append(f"{name}.required refers to unknown fields: {', '.join(missing)}")
-    return errors
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as exc:
+        return [f"{name} is invalid: {exc.message}"]
+    return []
 
 
 def _example_errors(schema: dict[str, Any], example: Any, name: str) -> list[str]:
-    if not isinstance(example, dict):
-        return [f"{name} must be an object"]
-    required = schema.get("required", [])
-    missing = sorted(set(required).difference(example)) if isinstance(required, list) else []
-    return [f"{name} is missing required fields: {', '.join(missing)}"] if missing else []
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError:
+        return []
+    errors = sorted(Draft202012Validator(schema).iter_errors(example), key=lambda error: str(list(error.path)))
+    return [
+        f"{name} does not match its schema at {'/'.join(str(part) for part in error.path) or '<root>'}: "
+        f"{error.message}"
+        for error in errors[:10]
+    ]
 
 
 def _contains_plaintext_secret(value: Any) -> bool:
@@ -139,12 +140,21 @@ def _is_breaking(previous: dict[str, Any], current: dict[str, Any]) -> bool:
     return bool(new_required.difference(old_required))
 
 
-def next_api_version(previous_manifest: dict[str, Any] | None, input_schema: dict[str, Any]) -> str:
+def next_api_version(
+    previous_manifest: dict[str, Any] | None,
+    input_schema: dict[str, Any],
+    output_schema: dict[str, Any] | None = None,
+) -> str:
     if not previous_manifest:
         return "v1"
     current = str(previous_manifest.get("api", {}).get("version", "v1"))
-    previous_schema = previous_manifest.get("api", {}).get("input_schema", {})
-    if not _is_breaking(previous_schema, input_schema):
+    previous_api = previous_manifest.get("api", {})
+    input_breaks = _is_breaking(previous_api.get("input_schema", {}), input_schema)
+    output_breaks = output_schema is not None and _is_breaking(
+        previous_api.get("output_schema", {}),
+        output_schema,
+    )
+    if not input_breaks and not output_breaks:
         return current
     try:
         return f"v{int(current.removeprefix('v')) + 1}"
@@ -383,6 +393,42 @@ def _validate_ingestion_contract(agent_data: dict[str, Any], ingestion_data: dic
     return errors
 
 
+def _validate_api_mappings(agent_data: dict[str, Any], api: AgentApiContract) -> list[str]:
+    nodes = {
+        node["id"]: node
+        for node in agent_data.get("nodes", [])
+        if isinstance(node, dict) and isinstance(node.get("id"), str)
+    }
+    input_properties = set(api.input_schema.get("properties", {}))
+    output_properties = set(api.output_schema.get("properties", {}))
+    required_inputs = set(api.input_schema.get("required", []))
+    required_outputs = set(api.output_schema.get("required", []))
+    errors: list[str] = []
+
+    if missing := sorted(required_inputs.difference(api.input_mapping)):
+        errors.append(f"Required API input fields are not mapped: {', '.join(missing)}")
+    if missing := sorted(required_outputs.difference(api.output_mapping)):
+        errors.append(f"Required API output fields are not mapped: {', '.join(missing)}")
+    if unknown := sorted(set(api.input_mapping).difference(input_properties)):
+        errors.append(f"Input mappings refer to unknown schema fields: {', '.join(unknown)}")
+    if unknown := sorted(set(api.output_mapping).difference(output_properties)):
+        errors.append(f"Output mappings refer to unknown schema fields: {', '.join(unknown)}")
+
+    for field_name, binding in api.input_mapping.items():
+        node = nodes.get(binding.component_id)
+        if node is None:
+            errors.append(f"Input field '{field_name}' refers to missing component '{binding.component_id}'")
+        elif binding.component_field not in _template(node):
+            errors.append(
+                f"Input field '{field_name}' refers to missing component field "
+                f"'{binding.component_id}.{binding.component_field}'"
+            )
+    for field_name, binding in api.output_mapping.items():
+        if binding.component_id not in nodes:
+            errors.append(f"Output field '{field_name}' refers to missing component '{binding.component_id}'")
+    return errors
+
+
 async def analyze_release(
     session: AsyncSession,
     *,
@@ -420,6 +466,7 @@ async def analyze_release(
         *_validate_json_schema(api.input_schema, "input_schema"),
         *_validate_json_schema(api.output_schema, "output_schema"),
         *_example_errors(api.input_schema, api.request_example, "request_example"),
+        *_example_errors(api.output_schema, api.response_example, "response_example"),
     ]
     try:
         json.dumps(api.response_example)
@@ -429,6 +476,7 @@ async def analyze_release(
         errors.append("API examples must not contain plaintext credentials")
     if isinstance(agent_version.data, dict) and isinstance(ingestion_version.data, dict):
         errors.extend(_validate_ingestion_contract(agent_version.data, ingestion_version.data))
+        errors.extend(_validate_api_mappings(agent_version.data, api))
     shared_knowledge_aliases = (
         _knowledge_aliases(agent_version.data).intersection(_knowledge_aliases(ingestion_version.data))
         if isinstance(agent_version.data, dict) and isinstance(ingestion_version.data, dict)
@@ -465,7 +513,7 @@ async def analyze_release(
         services.update(flow_services)
         sandbox = sandbox or flow_sandbox
 
-    api_version = next_api_version(previous_manifest, api.input_schema)
+    api_version = next_api_version(previous_manifest, api.input_schema, api.output_schema)
     manifest = {
         "schema_version": 1,
         "provider": "unnest-on-prem",
@@ -484,6 +532,12 @@ async def analyze_release(
             "output_schema": copy.deepcopy(api.output_schema),
             "request_example": copy.deepcopy(api.request_example),
             "response_example": copy.deepcopy(api.response_example),
+            "input_mapping": {
+                name: binding.model_dump(mode="json") for name, binding in api.input_mapping.items()
+            },
+            "output_mapping": {
+                name: binding.model_dump(mode="json") for name, binding in api.output_mapping.items()
+            },
             "openapi": build_openapi(
                 release_version=release_version,
                 api_version=api_version,

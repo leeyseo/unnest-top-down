@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from fastapi import status
-from langflow.services.deployment import WorkerArtifact, WorkerBuildStatus
+from langflow.services.deployment import WorkerArtifact, WorkerBuildStatus, next_api_version
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
@@ -22,6 +22,19 @@ def _node(node_id: str, node_type: str, **fields: Any) -> dict[str, Any]:
             "node": {"name": node_type, "template": template},
         },
     }
+
+
+def test_output_breaking_change_increments_api_version():
+    previous = {
+        "api": {
+            "version": "v1",
+            "input_schema": {"type": "object", "properties": {"message": {"type": "string"}}},
+            "output_schema": {"type": "object", "properties": {"answer": {"type": "string"}}},
+        }
+    }
+    changed_output = {"type": "object", "properties": {"answer": {"type": "object"}}}
+
+    assert next_api_version(previous, previous["api"]["input_schema"], changed_output) == "v2"
 
 
 async def _snapshot(client: AsyncClient, headers: dict[str, str], name: str, data: dict[str, Any]) -> str:
@@ -55,6 +68,18 @@ def _release_payload(agent_version_id: str, ingestion_version_id: str) -> dict[s
             },
             "request_example": {"message": "hello"},
             "response_example": {"answer": "hello"},
+            "input_mapping": {
+                "message": {
+                    "component_id": "agent-input",
+                    "component_field": "input_value",
+                }
+            },
+            "output_mapping": {
+                "answer": {
+                    "component_id": "agent-output",
+                    "result_path": "message.text",
+                }
+            },
         },
     }
 
@@ -64,7 +89,14 @@ async def _root_versions(client: AsyncClient, headers: dict[str, str]) -> tuple[
         client,
         headers,
         "agent-release-flow",
-        {"nodes": [_node("retrieval", "KnowledgeBase", knowledge_base="shared")], "edges": []},
+        {
+            "nodes": [
+                _node("agent-input", "ChatInput", input_value=""),
+                _node("agent-output", "ChatOutput"),
+                _node("retrieval", "KnowledgeBase", knowledge_base="shared"),
+            ],
+            "edges": [],
+        },
     )
     ingestion_version_id = await _snapshot(
         client,
@@ -101,6 +133,7 @@ async def test_create_on_prem_release_from_saved_versions(
     assert body["manifest"]["provider"] == "unnest-on-prem"
     assert [flow["role"] for flow in body["manifest"]["flows"]] == ["agent", "ingestion"]
     assert body["manifest"]["secret_names"] == []
+    assert body["manifest"]["api"]["input_mapping"]["message"]["component_id"] == "agent-input"
     assert body["manifest"]["build"]["sbom_required"] is True
     builds = await client.get(
         f"/api/v1/deployments/on-prem/releases/{body['id']}/builds",
@@ -224,7 +257,15 @@ async def test_validate_on_prem_release_rejects_plaintext_flow_secret(client: As
         client,
         logged_in_headers,
         "agent-with-secret",
-        {"nodes": [secret_node, _node("retrieval-secret", "KnowledgeBase", knowledge_base="shared")], "edges": []},
+        {
+            "nodes": [
+                secret_node,
+                _node("agent-input", "ChatInput", input_value=""),
+                _node("agent-output", "ChatOutput"),
+                _node("retrieval-secret", "KnowledgeBase", knowledge_base="shared"),
+            ],
+            "edges": [],
+        },
     )
 
     response = await client.post(
@@ -238,3 +279,22 @@ async def test_validate_on_prem_release_rejects_plaintext_flow_secret(client: As
     assert body["manifest"] is None
     assert any("plaintext value" in error for error in body["errors"])
     assert "do-not-package" not in response.text
+
+
+async def test_validate_on_prem_release_requires_api_component_mappings(
+    client: AsyncClient,
+    logged_in_headers,
+):
+    agent_version_id, ingestion_version_id = await _root_versions(client, logged_in_headers)
+    payload = _release_payload(agent_version_id, ingestion_version_id)
+    payload["api"]["input_mapping"] = {}
+
+    response = await client.post(
+        "/api/v1/deployments/on-prem/releases/validate",
+        headers=logged_in_headers,
+        json=payload,
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["manifest"] is None
+    assert "Required API input fields are not mapped: message" in response.json()["errors"]
