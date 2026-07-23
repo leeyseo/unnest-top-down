@@ -865,6 +865,38 @@ def _contract_input(release: DeploymentRelease, payload: dict[str, Any]) -> Simp
     return SimplifiedAPIRequest(output_type="any", tweaks=tweaks)
 
 
+def _conversation_storage_enabled(release: DeploymentRelease) -> bool:
+    deployment = release.manifest.get("deployment")
+    config = deployment if isinstance(deployment, dict) else release.config
+    return config.get("store_conversations") is True
+
+
+def _runtime_session_metadata(release: DeploymentRelease, current_user: User, trigger: str) -> dict[str, str]:
+    return {
+        "user_id": str(current_user.id),
+        "api_version": release.api_version,
+        "deployment_release_id": str(release.id),
+        "trigger": trigger,
+    }
+
+
+def _apply_conversation_policy(
+    release: DeploymentRelease,
+    flow: FlowRead,
+    input_request: SimplifiedAPIRequest,
+) -> None:
+    if _conversation_storage_enabled(release) or not isinstance(flow.data, dict):
+        return
+    tweaks = input_request.tweaks.root if input_request.tweaks is not None else {}
+    for node in flow.data.get("nodes", []):
+        if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+            continue
+        template = node.get("data", {}).get("node", {}).get("template", {})
+        if isinstance(template, dict) and "should_store_message" in template:
+            tweaks.setdefault(node["id"], {})["should_store_message"] = False
+    input_request.tweaks = Tweaks(root=tweaks)
+
+
 async def _apply_active_index_tweaks(
     session: DbSessionReadOnly,
     *,
@@ -980,6 +1012,7 @@ def _sandbox_payload(
     subflows: dict[str, dict[str, Any]],
     input_request: SimplifiedAPIRequest,
     current_user: User,
+    trigger: str = "api",
 ) -> dict[str, Any]:
     return {
         "execution_boundary": "whole-flow",
@@ -994,6 +1027,7 @@ def _sandbox_payload(
         "context": {
             "deployment_release_id": str(release.id),
             "deployment_subflows": copy.deepcopy(subflows),
+            "runtime_session_metadata": _runtime_session_metadata(release, current_user, trigger),
         },
         "request": input_request.model_dump(mode="json"),
         "security": {
@@ -1019,12 +1053,13 @@ async def _run_in_sandbox(
     input_request: SimplifiedAPIRequest,
     current_user: User,
     stream: bool,
+    trigger: str,
 ):
     try:
         client = SandboxWorkerClient.from_env()
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    payload = _sandbox_payload(release, flow, subflows, input_request, current_user)
+    payload = _sandbox_payload(release, flow, subflows, input_request, current_user, trigger)
     try:
         if stream:
             response = await client.stream(payload)
@@ -1055,6 +1090,7 @@ async def _run_agent(
     release, flow = await _immutable_agent_flow(session, api_version)
     subflows = await _immutable_subflows(session, release)
     input_request = _contract_input(release, payload)
+    _apply_conversation_policy(release, flow, input_request)
     await _apply_active_index_tweaks(
         session,
         release=release,
@@ -1070,6 +1106,7 @@ async def _run_agent(
                 input_request=input_request,
                 current_user=current_user,
                 stream=stream,
+                trigger=trigger,
             )
         else:
             # The route accepts no flow identifier: successful authentication grants
@@ -1083,6 +1120,7 @@ async def _run_agent(
                 context={
                     "deployment_release_id": str(release.id),
                     "deployment_subflows": subflows,
+                    "runtime_session_metadata": _runtime_session_metadata(release, current_user, trigger),
                 },
                 http_request=http_request,
             )
@@ -1385,7 +1423,9 @@ async def list_sessions(
     session: DbSessionReadOnly,
     current_user: RuntimeApiUser,
 ) -> list[str]:
-    _release, flow = await _immutable_agent_flow(session, api_version)
+    release, flow = await _immutable_agent_flow(session, api_version)
+    if not _conversation_storage_enabled(release):
+        return []
     statement = select(MessageTable.session_id).where(MessageTable.flow_id == flow.id).distinct()
     if not current_user.is_superuser:
         statement = statement.where(

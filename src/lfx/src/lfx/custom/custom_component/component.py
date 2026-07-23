@@ -1930,6 +1930,9 @@ class Component(CustomComponent):
             flow_id = str(self.graph.flow_id) if self.graph.flow_id else None
             graph_run_id = str(self.graph.run_id) if self.graph.run_id else None
             run_id = graph_run_id
+            runtime_metadata = self.graph.context.get("runtime_session_metadata")
+            if isinstance(runtime_metadata, dict):
+                session_metadata.update(runtime_metadata)
             if self.tracing_service:
                 langfuse_tracer = self.tracing_service.get_tracer("langfuse")
                 langfuse_trace_id = getattr(langfuse_tracer, "langfuse_trace_id", None)

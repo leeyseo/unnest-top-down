@@ -133,6 +133,48 @@ async def _root_versions(client: AsyncClient, headers: dict[str, str]) -> tuple[
     return agent_version_id, ingestion_version_id
 
 
+async def test_validation_rejects_direct_message_store_when_conversation_storage_is_off(
+    client: AsyncClient,
+    logged_in_headers_super_user,
+):
+    agent_version_id = await _snapshot(
+        client,
+        logged_in_headers_super_user,
+        "agent-with-direct-store",
+        {
+            "nodes": [
+                _node("agent-input", "ChatInput", input_value=""),
+                _node("direct-store", "StoreMessage"),
+                _node("agent-output", "ChatOutput"),
+                _node("retrieval", "KnowledgeBase", knowledge_base="shared"),
+            ],
+            "edges": [],
+        },
+    )
+    ingestion_version_id = await _snapshot(
+        client,
+        logged_in_headers_super_user,
+        "ingestion-for-direct-store",
+        {
+            "nodes": [
+                _node("file", "DeploymentFileInput"),
+                _node("knowledge", "Knowledge", knowledge_base="shared"),
+            ],
+            "edges": [{"source": "file", "target": "knowledge"}],
+        },
+    )
+    payload = _release_payload(agent_version_id, ingestion_version_id)
+
+    response = await client.post(
+        "/api/v1/deployments/on-prem/releases/validate",
+        headers=logged_in_headers_super_user,
+        json=payload,
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert any("direct conversation storage components (direct-store)" in error for error in response.json()["errors"])
+
+
 async def test_create_on_prem_release_from_saved_versions(
     client: AsyncClient, logged_in_headers_super_user, monkeypatch
 ):

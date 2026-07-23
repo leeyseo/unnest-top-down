@@ -55,6 +55,7 @@ _UNPINNED_VERSION_RE = re.compile(r"[<>=!~*\s]")
 _DEPENDENCY_KINDS = ("python_packages", "os_packages", "binaries")
 _MIN_HTTP_STATUS = 100
 _MAX_HTTP_STATUS = 599
+_DIRECT_CONVERSATION_STORE_TYPES = {"messagestore", "storemessage"}
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,22 @@ def _node_type(node: dict[str, Any]) -> str:
 def _field_value(template: dict[str, Any], field_name: str) -> Any:
     field = template.get(field_name)
     return field.get("value") if isinstance(field, dict) else None
+
+
+def _conversation_persistence_components(data: dict[str, Any]) -> list[str]:
+    components: list[str] = []
+    for node in data.get("nodes", []):
+        if not isinstance(node, dict):
+            continue
+        node_type = _node_type(node)
+        normalized_type = node_type.casefold()
+        template = _template(node)
+        stores_directly = normalized_type in _DIRECT_CONVERSATION_STORE_TYPES or (
+            normalized_type == "memory" and str(_field_value(template, "mode") or "Retrieve").casefold() == "store"
+        )
+        if stores_directly:
+            components.append(str(node.get("id") or node_type or "<unknown>"))
+    return sorted(set(components))
 
 
 def _validate_json_schema(schema: dict[str, Any], name: str) -> list[str]:
@@ -675,9 +692,18 @@ async def analyze_release(
             flow_declared_dependencies,
         ) = _inspect_flow(version)
         entry["declared_dependencies"] = flow_declared_dependencies
+        persistence_components = (
+            _conversation_persistence_components(version.data) if isinstance(version.data, dict) else []
+        )
+        entry["conversation_persistence_components"] = persistence_components
         entry["role"] = role
         flow_entries.append(entry)
         errors.extend(flow_errors)
+        if not config.store_conversations and persistence_components:
+            errors.append(
+                f"Flow version {version.id} contains direct conversation storage components "
+                f"({', '.join(persistence_components)}) while conversation storage is disabled"
+            )
         all_warnings.extend(flow_warnings)
         secrets.update(flow_secrets)
         endpoints.update(flow_endpoints)

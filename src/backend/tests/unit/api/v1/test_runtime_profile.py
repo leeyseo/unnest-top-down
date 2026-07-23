@@ -1,18 +1,20 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException, Request
 from langflow.api.v1.runtime import (
     _apply_active_index_tweaks,
+    _apply_conversation_policy,
     _contract_input,
     _contract_output,
     _immutable_agent_flow,
     _immutable_subflows,
     _sandbox_payload,
     execute_scheduled_agent,
+    list_sessions,
 )
 from langflow.api.v1.schemas import RunResponse, SimplifiedAPIRequest
 from langflow.main import create_runtime_app
@@ -20,6 +22,7 @@ from langflow.services.database.models.deployment_release import DeploymentRelea
 from langflow.services.database.models.flow.model import Flow, FlowRead
 from langflow.services.database.models.flow_version.model import FlowVersion
 from langflow.services.database.models.knowledge_base import KnowledgeBaseRecord
+from langflow.services.database.models.message.model import MessageTable
 from langflow.services.database.models.runtime_document import (
     DocumentVersion,
     IndexGeneration,
@@ -28,7 +31,9 @@ from langflow.services.database.models.runtime_document import (
 from langflow.services.database.models.runtime_schedule import RuntimeSchedule
 from langflow.services.database.models.user.model import User
 from langflow.services.deps import get_settings_service
+from lfx.custom.custom_component.component import Component
 from lfx.graph.schema import ResultData, RunOutputs
+from lfx.schema.message import Message
 
 
 def test_runtime_profile_mounts_only_deployment_routes(monkeypatch):
@@ -229,12 +234,8 @@ def test_runtime_applies_release_api_contract():
                     "required": ["answer"],
                     "additionalProperties": False,
                 },
-                "input_mapping": {
-                    "message": {"component_id": "agent-input", "component_field": "input_value"}
-                },
-                "output_mapping": {
-                    "answer": {"component_id": "agent-output", "result_path": "message.text"}
-                },
+                "input_mapping": {"message": {"component_id": "agent-input", "component_field": "input_value"}},
+                "output_mapping": {"answer": {"component_id": "agent-output", "result_path": "message.text"}},
             }
         },
     )
@@ -261,6 +262,140 @@ def test_runtime_applies_release_api_contract():
     with pytest.raises(HTTPException) as exc:
         _contract_input(release, {"message": 42})
     assert exc.value.status_code == 422
+
+
+def test_runtime_disables_component_message_storage_when_release_policy_is_off():
+    release = DeploymentRelease(
+        user_id=uuid4(),
+        version="1.0.0",
+        agent_flow_version_id=uuid4(),
+        ingestion_flow_version_id=uuid4(),
+        config={"store_conversations": False},
+        manifest={"deployment": {"store_conversations": False}},
+    )
+    flow = FlowRead.model_validate(
+        Flow(
+            name="conversation-policy",
+            user_id=release.user_id,
+            data={
+                "nodes": [
+                    {
+                        "id": "input",
+                        "data": {
+                            "node": {
+                                "template": {
+                                    "should_store_message": {"value": True},
+                                }
+                            }
+                        },
+                    },
+                    {
+                        "id": "output",
+                        "data": {
+                            "node": {
+                                "template": {
+                                    "should_store_message": {"value": True},
+                                }
+                            }
+                        },
+                    },
+                ],
+                "edges": [],
+            },
+        ),
+        from_attributes=True,
+    )
+    request = SimplifiedAPIRequest(tweaks={"input": {"input_value": "hello"}})
+
+    _apply_conversation_policy(release, flow, request)
+
+    assert request.tweaks is not None
+    assert request.tweaks.root["input"]["should_store_message"] is False
+    assert request.tweaks.root["output"]["should_store_message"] is False
+
+
+async def test_runtime_session_metadata_is_added_to_stored_messages(monkeypatch):
+    class RuntimeMetadataComponent(Component):
+        def build(self) -> None:
+            pass
+
+    graph = MagicMock()
+    graph.flow_id = str(uuid4())
+    graph.run_id = str(uuid4())
+    graph.context = {
+        "runtime_session_metadata": {
+            "user_id": "trusted-user",
+            "api_version": "v1",
+        }
+    }
+    component = RuntimeMetadataComponent(_vertex=MagicMock(graph=graph), _tracing_service=None)
+    message = Message(
+        text="hello",
+        sender="User",
+        sender_name="User",
+        session_id="session-1",
+        session_metadata={"user_id": "untrusted-user", "client": "kept"},
+    )
+    store = AsyncMock(return_value=[message])
+    monkeypatch.setattr("lfx.custom.custom_component.component.astore_message", store)
+
+    await component._store_message(message)
+
+    stored_message = store.await_args.args[0]
+    assert stored_message.session_metadata == {
+        "user_id": "trusted-user",
+        "client": "kept",
+        "api_version": "v1",
+    }
+
+
+async def test_runtime_sessions_are_owner_scoped_and_hidden_when_storage_is_off(async_session, monkeypatch):
+    monkeypatch.setenv("UNNEST_RUNTIME_SETUP_COMPLETE", "true")
+    release_owner = User(username="release-owner", password="unused", is_active=True)  # noqa: S106
+    runtime_user = User(username="runtime-user", password="unused", is_active=True)  # noqa: S106
+    other_user = User(username="other-user", password="unused", is_active=True)  # noqa: S106
+    flow = Flow(name="session-agent", user_id=release_owner.id, data={"nodes": [], "edges": []})
+    version = FlowVersion(
+        flow_id=flow.id,
+        user_id=release_owner.id,
+        data={"nodes": [], "edges": []},
+        version_number=1,
+    )
+    release = DeploymentRelease(
+        user_id=release_owner.id,
+        version="1.0.0",
+        agent_flow_version_id=version.id,
+        ingestion_flow_version_id=version.id,
+        api_version="v1",
+        config={"store_conversations": True},
+        manifest={"deployment": {"store_conversations": True}},
+    )
+    own_message = MessageTable(
+        sender="User",
+        sender_name="User",
+        text="mine",
+        session_id="own-session",
+        flow_id=flow.id,
+        session_metadata={"user_id": str(runtime_user.id), "api_version": "v1"},
+    )
+    other_message = MessageTable(
+        sender="User",
+        sender_name="User",
+        text="other",
+        session_id="other-session",
+        flow_id=flow.id,
+        session_metadata={"user_id": str(other_user.id), "api_version": "v1"},
+    )
+    async_session.add_all([release_owner, runtime_user, other_user, flow, version, release, own_message, other_message])
+    await async_session.commit()
+
+    assert await list_sessions("v1", async_session, runtime_user) == ["own-session"]
+
+    release.manifest = {"deployment": {"store_conversations": False}}
+    async_session.add(release)
+    await async_session.commit()
+
+    assert await list_sessions("v1", async_session, runtime_user) == []
 
 
 def test_sandbox_payload_preserves_whole_flow_boundary():
@@ -304,6 +439,12 @@ def test_sandbox_payload_preserves_whole_flow_boundary():
     assert payload["execution_boundary"] == "whole-flow"
     assert payload["flow"]["data"] == flow.data
     assert payload["context"]["deployment_subflows"]["subflow-id"]["name"] == "released-subflow"
+    assert payload["context"]["runtime_session_metadata"] == {
+        "user_id": str(user.id),
+        "api_version": "v1",
+        "deployment_release_id": str(release.id),
+        "trigger": "api",
+    }
     assert payload["security"]["network"] == "deny-by-default"
     assert payload["security"]["allowed_endpoints"] == ["https://models.internal/v1"]
 

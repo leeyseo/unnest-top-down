@@ -14,6 +14,7 @@ from sqlmodel import col, select
 
 from langflow.services.database.models.runtime_schedule import RuntimeSchedule
 from langflow.services.deps import session_scope
+from langflow.services.runtime_conversation import purge_expired_runtime_conversations
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -37,6 +38,7 @@ _MONTH_NAMES = {
 }
 _WEEKDAY_NAMES = {"sun": 0, "mon": 1, "tue": 2, "wed": 3, "thu": 4, "fri": 5, "sat": 6}
 _MAX_CRON_SEARCH_MINUTES = 5 * 366 * 24 * 60
+_MAINTENANCE_INTERVAL = timedelta(hours=1)
 
 
 def _cron_number(value: str, aliases: dict[str, int] | None) -> int:
@@ -128,17 +130,25 @@ async def _execute_schedule(schedule_id: UUID) -> None:
     await execute_scheduled_agent(schedule_id)
 
 
+async def _purge_conversations(now: datetime) -> int:
+    async with session_scope() as session:
+        return await purge_expired_runtime_conversations(session, now=now)
+
+
 class RuntimeScheduler:
     def __init__(
         self,
         *,
         executor: Callable[[UUID], Awaitable[None]] = _execute_schedule,
+        maintenance: Callable[[datetime], Awaitable[int]] = _purge_conversations,
         poll_seconds: float = 15.0,
     ) -> None:
         self.executor = executor
+        self.maintenance = maintenance
         self.poll_seconds = poll_seconds
         self._stop: asyncio.Event | None = None
         self._task: asyncio.Task[None] | None = None
+        self._last_maintenance_at: datetime | None = None
 
     def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -236,6 +246,9 @@ class RuntimeScheduler:
                     schedule.last_error = error
                     schedule.updated_at = datetime.now(timezone.utc)
                     session.add(schedule)
+        if self._last_maintenance_at is None or current - self._last_maintenance_at >= _MAINTENANCE_INTERVAL:
+            await self.maintenance(current)
+            self._last_maintenance_at = current
 
 
 _runtime_scheduler = RuntimeScheduler()
