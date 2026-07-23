@@ -36,6 +36,8 @@ def test_runtime_profile_mounts_only_deployment_routes(monkeypatch):
     assert "/api/v1/files/{document_id}/download" in paths
     assert "/api/v1/ingestion/jobs/{job_id}" in paths
     assert "/api/v1/admin/api-keys" in paths
+    assert "/api/v1/admin/audit" in paths
+    assert "/api/v1/admin/audit/checkpoints" in paths
     assert "/health" in paths
     assert "/ready" in paths
     assert "/metrics" in paths
@@ -235,6 +237,7 @@ async def test_risky_release_dispatches_entire_flow_to_sandbox(monkeypatch):
     )
     sandbox_run = AsyncMock(return_value="sandbox-stream")
     standard_run = AsyncMock()
+    audit_event = AsyncMock()
     monkeypatch.setattr("langflow.api.v1.runtime._immutable_agent_flow", AsyncMock(return_value=(release, flow)))
     monkeypatch.setattr("langflow.api.v1.runtime._immutable_subflows", AsyncMock(return_value={}))
     monkeypatch.setattr(
@@ -243,6 +246,7 @@ async def test_risky_release_dispatches_entire_flow_to_sandbox(monkeypatch):
     )
     monkeypatch.setattr("langflow.api.v1.runtime._run_in_sandbox", sandbox_run)
     monkeypatch.setattr("langflow.api.v1.runtime._run_flow_internal", standard_run)
+    monkeypatch.setattr("langflow.api.v1.runtime._record_runtime_audit_event", audit_event)
 
     from langflow.api.v1.runtime import _run_agent
 
@@ -259,3 +263,5 @@ async def test_risky_release_dispatches_entire_flow_to_sandbox(monkeypatch):
     assert result == "sandbox-stream"
     sandbox_run.assert_awaited_once()
     standard_run.assert_not_awaited()
+    audit_event.assert_awaited_once()
+    assert audit_event.call_args.kwargs["details"]["status"] == "stream_started"

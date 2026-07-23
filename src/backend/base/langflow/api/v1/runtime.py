@@ -9,6 +9,7 @@ import io
 import mimetypes
 import os
 import tempfile
+import time
 import zipfile
 from collections.abc import AsyncGenerator
 from contextlib import suppress
@@ -22,9 +23,10 @@ from uuid import UUID, uuid4
 import filetype
 import httpx
 from anyio import Path as AsyncPath
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, Form, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 from jsonschema import Draft202012Validator
+from lfx.log.logger import logger
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
 from sqlmodel import col, func, select
@@ -42,6 +44,7 @@ from langflow.services.database.models.flow_version.model import FlowVersion
 from langflow.services.database.models.jobs.model import Job, JobStatus, JobType
 from langflow.services.database.models.knowledge_base import KnowledgeBaseRecord
 from langflow.services.database.models.message.model import MessageTable
+from langflow.services.database.models.runtime_audit import RuntimeAuditCheckpoint, RuntimeAuditEvent
 from langflow.services.database.models.runtime_document import DocumentVersion, RuntimeDocument
 from langflow.services.database.models.user.model import User
 from langflow.services.deployment import SandboxWorkerClient
@@ -52,6 +55,11 @@ from langflow.services.deps import (
     get_storage_service,
     get_task_service,
     session_scope,
+)
+from langflow.services.runtime_audit import (
+    append_runtime_audit_event,
+    create_runtime_audit_checkpoint,
+    verify_runtime_audit_chain,
 )
 from langflow.services.runtime_document import (
     DuplicateStrategy,
@@ -94,6 +102,27 @@ class RuntimeIngestionJobRead(BaseModel):
     status: str
     document_id: UUID | None
     metadata: dict
+
+
+class RuntimeAuditEventRead(BaseModel):
+    id: UUID
+    sequence: int
+    previous_hash: str
+    event_hash: str
+    event_type: str
+    actor_user_id: UUID | None
+    resource_type: str | None
+    resource_id: str | None
+    details: dict[str, Any]
+    occurred_at: datetime
+
+
+async def _record_runtime_audit_event(**kwargs: Any) -> None:
+    try:
+        async with session_scope() as audit_session:
+            await append_runtime_audit_event(audit_session, **kwargs)
+    except Exception:  # noqa: BLE001 - audit failure must be operator-visible without hiding the original result
+        await logger.aexception("Runtime audit event write failed")
 
 
 async def _runtime_api_user(
@@ -656,40 +685,72 @@ async def _run_agent(
     session: DbSessionReadOnly,
     http_request: Request,
 ):
+    started_at = time.monotonic()
     release, flow = await _immutable_agent_flow(session, api_version)
     subflows = await _immutable_subflows(session, release)
     input_request = _contract_input(release, payload)
-    if release.manifest.get("sandbox", {}).get("required") is True:
-        result = await _run_in_sandbox(
-            release=release,
-            flow=flow,
-            subflows=subflows,
-            input_request=input_request,
-            current_user=current_user,
-            stream=stream,
-        )
+    try:
+        if release.manifest.get("sandbox", {}).get("required") is True:
+            result = await _run_in_sandbox(
+                release=release,
+                flow=flow,
+                subflows=subflows,
+                input_request=input_request,
+                current_user=current_user,
+                stream=stream,
+            )
+        else:
+            # The route accepts no flow identifier: successful authentication grants
+            # execution only of the release-pinned Agent version.
+            result = await _run_flow_internal(
+                background_tasks=background_tasks,
+                flow=flow,
+                input_request=input_request,
+                stream=stream,
+                api_key_user=current_user,
+                context={
+                    "deployment_release_id": str(release.id),
+                    "deployment_subflows": subflows,
+                },
+                http_request=http_request,
+            )
         if stream:
-            return result
-        return _contract_output(release, result)
-    # The route accepts no flow identifier: successful authentication grants
-    # execution only of the release-pinned Agent version.
-    result = await _run_flow_internal(
-        background_tasks=background_tasks,
-        flow=flow,
-        input_request=input_request,
-        stream=stream,
-        api_key_user=current_user,
-        context={
-            "deployment_release_id": str(release.id),
-            "deployment_subflows": subflows,
+            response = result
+        else:
+            if not isinstance(result, RunResponse):
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="Agent returned an invalid response",
+                )
+            response = _contract_output(release, result)
+    except Exception as exc:
+        await _record_runtime_audit_event(
+            event_type="agent.call",
+            actor_user_id=current_user.id,
+            resource_type="deployment_release",
+            resource_id=str(release.id),
+            details={
+                "api_version": api_version,
+                "latency_ms": round((time.monotonic() - started_at) * 1000, 3),
+                "status": "error",
+                "stream": stream,
+                "error_type": type(exc).__name__,
+            },
+        )
+        raise
+    await _record_runtime_audit_event(
+        event_type="agent.call",
+        actor_user_id=current_user.id,
+        resource_type="deployment_release",
+        resource_id=str(release.id),
+        details={
+            "api_version": api_version,
+            "latency_ms": round((time.monotonic() - started_at) * 1000, 3),
+            "status": "stream_started" if stream else "success",
+            "stream": stream,
         },
-        http_request=http_request,
     )
-    if stream:
-        return result
-    if not isinstance(result, RunResponse):
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Agent returned an invalid response")
-    return _contract_output(release, result)
+    return response
 
 
 @router.get("/ready")
@@ -818,7 +879,16 @@ async def create_runtime_api_key(
     session: DbSession,
     admin: Annotated[User, Depends(get_current_active_superuser)],
 ) -> UnmaskedApiKeyRead:
-    return await create_api_key(session, payload, user_id=admin.id)
+    api_key = await create_api_key(session, payload, user_id=admin.id)
+    await append_runtime_audit_event(
+        session,
+        event_type="api_key.created",
+        actor_user_id=admin.id,
+        resource_type="api_key",
+        resource_id=str(api_key.id),
+        details={"name": api_key.name},
+    )
+    return api_key
 
 
 @router.delete("/api/v1/admin/api-keys/{api_key_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -831,6 +901,58 @@ async def delete_runtime_api_key(
         await delete_api_key(session, api_key_id, admin.id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found") from exc
+    await append_runtime_audit_event(
+        session,
+        event_type="api_key.deleted",
+        actor_user_id=admin.id,
+        resource_type="api_key",
+        resource_id=str(api_key_id),
+    )
+
+
+@router.get("/api/v1/admin/audit")
+async def list_runtime_audit_events(
+    session: DbSessionReadOnly,
+    _admin: Annotated[User, Depends(get_current_active_superuser)],
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, Any]:
+    events = (
+        await session.exec(
+            select(RuntimeAuditEvent)
+            .order_by(col(RuntimeAuditEvent.sequence).desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    ).all()
+    return {
+        "events": [
+            RuntimeAuditEventRead.model_validate(event, from_attributes=True).model_dump(mode="json")
+            for event in events
+        ],
+        "integrity": await verify_runtime_audit_chain(session),
+    }
+
+
+@router.post("/api/v1/admin/audit/checkpoints", status_code=status.HTTP_201_CREATED)
+async def create_runtime_audit_checkpoint_route(
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> dict[str, Any]:
+    await append_runtime_audit_event(
+        session,
+        event_type="audit.checkpoint.created",
+        actor_user_id=admin.id,
+        resource_type="runtime_audit",
+    )
+    try:
+        checkpoint = await create_runtime_audit_checkpoint(session)
+    except (OSError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+    return RuntimeAuditCheckpoint.model_validate(checkpoint, from_attributes=True).model_dump(mode="json")
 
 
 @router.get("/api/v1/files")
@@ -895,6 +1017,14 @@ async def upload_runtime_document(
     if created:
         await storage_service.save_file(storage_namespace, storage_name, data)
     if not created:
+        await append_runtime_audit_event(
+            session,
+            event_type="file.upload_skipped",
+            actor_user_id=_admin.id,
+            resource_type="runtime_document",
+            resource_id=str(document.id),
+            details={"checksum": version.checksum},
+        )
         return _document_read(document, version, created=False)
     ingestion_version = await session.get(FlowVersion, release.ingestion_flow_version_id)
     if ingestion_version is None:
@@ -930,6 +1060,14 @@ async def upload_runtime_document(
         user_id=release.user_id,
         job_id=job_id,
     )
+    await append_runtime_audit_event(
+        session,
+        event_type="file.uploaded",
+        actor_user_id=_admin.id,
+        resource_type="runtime_document",
+        resource_id=str(document.id),
+        details={"checksum": version.checksum, "job_id": str(job_id), "size_bytes": version.size_bytes},
+    )
     return _document_read(document, version, created=True, job_id=job_id)
 
 
@@ -948,6 +1086,13 @@ async def download_runtime_document(
     )
     namespace, storage_name = version.storage_path.split("/", 1)
     data = await storage_service.get_file(namespace, storage_name)
+    await _record_runtime_audit_event(
+        event_type="file.downloaded",
+        actor_user_id=_admin.id,
+        resource_type="runtime_document",
+        resource_id=str(document.id),
+        details={"checksum": version.checksum},
+    )
     return StreamingResponse(
         io.BytesIO(data),
         media_type=version.mime_type,
@@ -969,6 +1114,14 @@ async def delete_runtime_document(
     )
     retention_days = int(os.getenv("UNNEST_DOCUMENT_RETENTION_DAYS", "30"))
     await move_document_to_trash(session, document=document, retention_days=max(1, retention_days))
+    await append_runtime_audit_event(
+        session,
+        event_type="file.deleted",
+        actor_user_id=_admin.id,
+        resource_type="runtime_document",
+        resource_id=str(document.id),
+        details={"retention_days": max(1, retention_days)},
+    )
 
 
 @router.post("/api/v1/files/{document_id}/restore")
@@ -984,6 +1137,13 @@ async def restore_runtime_document(
         knowledge_base_id=knowledge_base.id,
     )
     await restore_document(session, document=document)
+    await append_runtime_audit_event(
+        session,
+        event_type="file.restored",
+        actor_user_id=_admin.id,
+        resource_type="runtime_document",
+        resource_id=str(document.id),
+    )
     return _document_read(document, version)
 
 
@@ -1019,6 +1179,14 @@ async def cancel_runtime_ingestion_job(
     job.status = JobStatus.CANCELLED
     session.add(job)
     await session.flush()
+    await append_runtime_audit_event(
+        session,
+        event_type="ingestion.cancelled",
+        actor_user_id=_admin.id,
+        resource_type="ingestion_job",
+        resource_id=str(job.job_id),
+        details={"document_id": str(job.asset_id) if job.asset_id else None},
+    )
     return RuntimeIngestionJobRead(
         id=job.job_id,
         status=job.status.value,
