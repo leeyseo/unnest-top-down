@@ -219,6 +219,11 @@ def get_lifespan(*, fix_migration=False, version=None, runtime_only: bool = Fals
             # migration application both no-op when already done.
             await initialize_services(fix_migration=fix_migration, skip_superuser_setup=runtime_only)
             await logger.adebug(f"Services initialized in {asyncio.get_event_loop().time() - start_time:.2f}s")
+            if runtime_only:
+                from langflow.services.runtime_bundle import load_bundled_runtime_release
+
+                if await load_bundled_runtime_release():
+                    await logger.ainfo("Imported immutable release bundled in the runtime image")
 
             # Start the telemetry writer (no-op when telemetry_writer_enabled is False).
             try:

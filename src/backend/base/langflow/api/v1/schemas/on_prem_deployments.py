@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
@@ -14,6 +15,18 @@ _SEMVER_RE = re.compile(
     r"(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?"
     r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
 )
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _configured_base_image_digest() -> str | None:
+    value = os.getenv("UNNEST_RUNTIME_BASE_IMAGE")
+    if not value:
+        return None
+    digest = value.rpartition("@")[2]
+    if not _SHA256_RE.fullmatch(digest):
+        msg = "UNNEST_RUNTIME_BASE_IMAGE must be pinned as repository@sha256:digest"
+        raise ValueError(msg)
+    return digest
 
 
 def _validate_semver(value: str) -> str:
@@ -92,7 +105,9 @@ class OnPremDeploymentConfig(BaseModel):
     allow_language_switch: bool = True
     external_endpoints: list[HttpUrl] = Field(default_factory=list)
     additional_secret_names: list[str] = Field(default_factory=list)
-    base_image_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    base_image_digest: str | None = Field(
+        default_factory=_configured_base_image_digest, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
     branding: BrandingConfig = Field(default_factory=BrandingConfig)
     features: FeatureConfig = Field(default_factory=FeatureConfig)
     retention: ArtifactRetentionConfig = Field(default_factory=ArtifactRetentionConfig)

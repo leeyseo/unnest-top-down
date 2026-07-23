@@ -180,6 +180,7 @@ override-dependencies = [
 [project.scripts]
 langflow = "langflow.langflow_launcher:main"
 unnestctl = "langflow.unnestctl:main"
+unnest-build-worker = "langflow.services.deployment.build_worker:main"
 
 [tool.codespell]
 skip = '.git,*.pdf,*.svg,*.pdf,*.yaml,*.ipynb,poetry.lock,*.min.js,*.css,package-lock.json,*.trig.,**/node_modules/**,./stuff/*,*.csv'

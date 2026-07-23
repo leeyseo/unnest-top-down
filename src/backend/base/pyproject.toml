@@ -551,3 +551,4 @@ all = [
 [project.scripts]
 langflow-base = "langflow.langflow_launcher:main"
 unnestctl = "langflow.unnestctl:main"
+unnest-build-worker = "langflow.services.deployment.build_worker:main"
