@@ -12,8 +12,7 @@ if TYPE_CHECKING:
 
 def _node(node_id: str, node_type: str, **fields: Any) -> dict[str, Any]:
     template = {
-        name: {"name": name, "value": value, "password": False, "load_from_db": False}
-        for name, value in fields.items()
+        name: {"name": name, "value": value, "password": False, "load_from_db": False} for name, value in fields.items()
     }
     template["_type"] = node_type
     return {
@@ -184,9 +183,7 @@ async def test_create_on_prem_release_from_saved_versions(
                         location="release.tar",
                         digest=f"sha256:{hashlib.sha256(self.artifact_content).hexdigest()}",
                         size_bytes=len(self.artifact_content),
-                        checksums={
-                            "release.tar": f"sha256:{hashlib.sha256(self.artifact_content).hexdigest()}"
-                        },
+                        checksums={"release.tar": f"sha256:{hashlib.sha256(self.artifact_content).hexdigest()}"},
                         sbom={"bomFormat": "CycloneDX"},
                         signature="cosign-signature",
                     )
@@ -250,8 +247,7 @@ async def test_create_on_prem_release_from_saved_versions(
     artifact = succeeded.json()["artifacts"][0]
 
     downloaded = await client.get(
-        f"/api/v1/deployments/on-prem/releases/{body['id']}/builds/{build['id']}"
-        f"/artifacts/{artifact['id']}/download",
+        f"/api/v1/deployments/on-prem/releases/{body['id']}/builds/{build['id']}/artifacts/{artifact['id']}/download",
         headers=logged_in_headers,
     )
     assert downloaded.status_code == status.HTTP_200_OK
@@ -350,6 +346,29 @@ async def test_validate_on_prem_release_routes_risky_flow_to_declared_sandbox_ne
         "deployment": {
             "sandbox": True,
             "internal_endpoints": ["https://models.internal/v1"],
+            "python_packages": [
+                {
+                    "name": "agency-sdk",
+                    "version": "1.2.3",
+                    "hashes": [f"sha256:{'a' * 64}"],
+                }
+            ],
+            "os_packages": [
+                {
+                    "name": "libmagic1",
+                    "version": "1:5.44-3",
+                    "checksum": f"sha256:{'b' * 64}",
+                }
+            ],
+            "binaries": [
+                {
+                    "name": "agency-parser",
+                    "version": "2.0.0",
+                    "source": "https://packages.internal/agency-parser",
+                    "checksum": f"sha256:{'c' * 64}",
+                    "license": "Apache-2.0",
+                }
+            ],
         }
     }
     agent_version_id = await _snapshot(
@@ -379,3 +398,57 @@ async def test_validate_on_prem_release_routes_risky_flow_to_declared_sandbox_ne
     sandbox = response.json()["manifest"]["sandbox"]
     assert sandbox["required"] is True
     assert sandbox["allowed_endpoints"] == ["https://models.internal/v1"]
+    manifest = response.json()["manifest"]
+    assert manifest["build"]["declared_dependency_count"] == 3
+    assert manifest["dependency_lock"]["python_packages"] == [
+        {
+            "name": "agency-sdk",
+            "version": "1.2.3",
+            "hashes": [f"sha256:{'a' * 64}"],
+        }
+    ]
+    assert manifest["dependency_lock"]["binaries"][0]["license"] == "Apache-2.0"
+
+
+async def test_validate_on_prem_release_rejects_unlocked_custom_dependency(
+    client: AsyncClient,
+    logged_in_headers,
+):
+    risky = _node("custom", "CustomComponent")
+    risky["data"]["node"]["metadata"] = {
+        "deployment": {
+            "python_packages": [
+                {
+                    "name": "agency-sdk",
+                    "version": ">=1.2.3",
+                    "hashes": [],
+                }
+            ]
+        }
+    }
+    agent_version_id = await _snapshot(
+        client,
+        logged_in_headers,
+        "unlocked-custom-agent",
+        {
+            "nodes": [
+                _node("agent-input", "ChatInput", input_value=""),
+                _node("agent-output", "ChatOutput"),
+                _node("retrieval", "KnowledgeBase", knowledge_base="shared"),
+                risky,
+            ],
+            "edges": [],
+        },
+    )
+    _unused_agent, ingestion_version_id = await _root_versions(client, logged_in_headers)
+
+    response = await client.post(
+        "/api/v1/deployments/on-prem/releases/validate",
+        headers=logged_in_headers,
+        json=_release_payload(agent_version_id, ingestion_version_id),
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["manifest"] is None
+    assert any(".version must be an exact version" in error for error in response.json()["errors"])
+    assert any(".hashes must contain" in error for error in response.json()["errors"])

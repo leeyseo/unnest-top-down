@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import warnings as python_warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -43,6 +44,10 @@ _SERVICE_NAMES = {
 _MODEL_FIELDS = {"model", "model_id", "model_name", "llm_model", "embedding_model"}
 _KB_FIELDS = {"knowledge_base", "knowledge_base_name", "kb_name", "collection_name"}
 _RISKY_NODE_MARKERS = ("customcomponent", "pythonrepl", "pythoninterpreter", "shell", "subprocess")
+_SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+_DEPENDENCY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:-]*$")
+_UNPINNED_VERSION_RE = re.compile(r"[<>=!~*\s]")
+_DEPENDENCY_KINDS = ("python_packages", "os_packages", "binaries")
 
 
 @dataclass(frozen=True)
@@ -95,8 +100,7 @@ def _example_errors(schema: dict[str, Any], example: Any, name: str) -> list[str
         return []
     errors = sorted(Draft202012Validator(schema).iter_errors(example), key=lambda error: str(list(error.path)))
     return [
-        f"{name} does not match its schema at {'/'.join(str(part) for part in error.path) or '<root>'}: "
-        f"{error.message}"
+        f"{name} does not match its schema at {'/'.join(str(part) for part in error.path) or '<root>'}: {error.message}"
         for error in errors[:10]
     ]
 
@@ -122,6 +126,97 @@ def _safe_endpoint(value: str) -> str | None:
         return None
     port = f":{parsed.port}" if parsed.port else ""
     return urlunparse((parsed.scheme, f"{parsed.hostname}{port}", parsed.path or "/", "", "", ""))
+
+
+def _declared_dependencies(
+    deployment_metadata: dict[str, Any],
+    *,
+    flow_version_id: UUID,
+    component: str,
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    dependencies = {kind: [] for kind in _DEPENDENCY_KINDS}
+    errors: list[str] = []
+    prefix = f"Flow version {flow_version_id} component '{component}'"
+    for kind in _DEPENDENCY_KINDS:
+        declarations = deployment_metadata.get(kind, [])
+        if not isinstance(declarations, list):
+            errors.append(f"{prefix} deployment.{kind} must be a list")
+            continue
+        for index, declaration in enumerate(declarations):
+            label = f"{prefix} deployment.{kind}[{index}]"
+            if not isinstance(declaration, dict):
+                errors.append(f"{label} must be an object")
+                continue
+            name = declaration.get("name")
+            version = declaration.get("version")
+            if not isinstance(name, str) or not name.strip():
+                errors.append(f"{label}.name is required")
+            elif not _DEPENDENCY_NAME_RE.fullmatch(name.strip()):
+                errors.append(f"{label}.name contains unsupported characters")
+            if not isinstance(version, str) or not version.strip():
+                errors.append(f"{label}.version is required")
+            elif _UNPINNED_VERSION_RE.search(version.strip()):
+                errors.append(f"{label}.version must be an exact version, not a range")
+            if not isinstance(name, str) or not name.strip() or not isinstance(version, str) or not version.strip():
+                continue
+            normalized: dict[str, Any] = {
+                "name": name.strip(),
+                "version": version.strip(),
+            }
+            if kind == "python_packages":
+                hashes = declaration.get("hashes")
+                if (
+                    not isinstance(hashes, list)
+                    or not hashes
+                    or any(not isinstance(value, str) or not _SHA256_RE.fullmatch(value) for value in hashes)
+                ):
+                    errors.append(f"{label}.hashes must contain one or more lowercase SHA-256 digests")
+                    continue
+                normalized["hashes"] = sorted(set(hashes))
+            else:
+                checksum = declaration.get("checksum")
+                if not isinstance(checksum, str) or not _SHA256_RE.fullmatch(checksum):
+                    errors.append(f"{label}.checksum must be a lowercase SHA-256 digest")
+                    continue
+                normalized["checksum"] = checksum
+            if kind == "binaries":
+                source = declaration.get("source")
+                license_name = declaration.get("license")
+                parsed_source = _safe_endpoint(source) if isinstance(source, str) else None
+                if parsed_source is None or not parsed_source.startswith("https://") or parsed_source != source:
+                    errors.append(
+                        f"{label}.source must be an HTTPS URL without credentials, query parameters, or fragments"
+                    )
+                    continue
+                if not isinstance(license_name, str) or not license_name.strip():
+                    errors.append(f"{label}.license is required")
+                    continue
+                normalized.update(source=source, license=license_name.strip())
+            dependencies[kind].append(normalized)
+    return dependencies, errors
+
+
+def _merge_declared_dependencies(
+    target: dict[str, list[dict[str, Any]]],
+    incoming: dict[str, list[dict[str, Any]]],
+) -> list[str]:
+    errors: list[str] = []
+    for kind in _DEPENDENCY_KINDS:
+        by_name = {item["name"].casefold(): item for item in target[kind]}
+        for item in incoming[kind]:
+            key = item["name"].casefold()
+            existing = by_name.get(key)
+            if existing is not None and existing != item:
+                errors.append(
+                    f"Conflicting {kind} lock declarations for '{item['name']}': "
+                    f"{existing['version']} and {item['version']}"
+                )
+                continue
+            if existing is None:
+                target[kind].append(item)
+                by_name[key] = item
+        target[kind].sort(key=lambda value: (value["name"].casefold(), value["version"]))
+    return errors
 
 
 def _is_breaking(previous: dict[str, Any], current: dict[str, Any]) -> bool:
@@ -195,7 +290,18 @@ def build_openapi(
 
 def _inspect_flow(
     version: FlowVersion,
-) -> tuple[dict[str, Any], list[str], list[str], set[str], set[str], set[str], set[str], bool]:
+) -> tuple[
+    dict[str, Any],
+    list[str],
+    list[str],
+    set[str],
+    set[str],
+    set[str],
+    set[str],
+    bool,
+    dict[str, list[dict[str, Any]]],
+]:
+    declared_dependencies = {kind: [] for kind in _DEPENDENCY_KINDS}
     data = version.data
     if not isinstance(data, dict) or not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
         return (
@@ -207,6 +313,7 @@ def _inspect_flow(
             set(),
             set(),
             False,
+            declared_dependencies,
         )
 
     errors: list[str] = []
@@ -257,6 +364,13 @@ def _inspect_flow(
                 if isinstance(endpoint, str) and (safe_endpoint := _safe_endpoint(endpoint)):
                     endpoints.add(safe_endpoint)
                     allowed_sandbox_endpoints.add(safe_endpoint)
+            declared, dependency_errors = _declared_dependencies(
+                deployment_metadata,
+                flow_version_id=version.id,
+                component=node_type or str(node.get("id") or "<unknown>"),
+            )
+            errors.extend(dependency_errors)
+            errors.extend(_merge_declared_dependencies(declared_dependencies, declared))
 
         if isinstance(node_metadata, dict) and str(node_metadata.get("module", "")).startswith("custom_components."):
             sandbox = True
@@ -293,6 +407,7 @@ def _inspect_flow(
         services,
         allowed_sandbox_endpoints,
         sandbox,
+        declared_dependencies,
     )
 
 
@@ -459,9 +574,7 @@ async def analyze_release(
     ).all()
     by_id = {version.id: version for version in root_versions}
     missing = [
-        str(version_id)
-        for version_id in (agent_flow_version_id, ingestion_flow_version_id)
-        if version_id not in by_id
+        str(version_id) for version_id in (agent_flow_version_id, ingestion_flow_version_id) if version_id not in by_id
     ]
     if missing:
         return ReleaseAnalysis(None, (), (f"Flow Version not found: {', '.join(missing)}",), ())
@@ -502,6 +615,7 @@ async def analyze_release(
     endpoints = {str(endpoint) for endpoint in config.external_endpoints}
     services: set[str] = set()
     allowed_sandbox_endpoints: set[str] = set()
+    dependency_lock = {kind: [] for kind in _DEPENDENCY_KINDS}
     sandbox = False
     for role, version in [
         ("agent", agent_version),
@@ -517,7 +631,9 @@ async def analyze_release(
             flow_services,
             flow_allowed_sandbox_endpoints,
             flow_sandbox,
+            flow_declared_dependencies,
         ) = _inspect_flow(version)
+        entry["declared_dependencies"] = flow_declared_dependencies
         entry["role"] = role
         flow_entries.append(entry)
         errors.extend(flow_errors)
@@ -526,6 +642,7 @@ async def analyze_release(
         endpoints.update(flow_endpoints)
         services.update(flow_services)
         allowed_sandbox_endpoints.update(flow_allowed_sandbox_endpoints)
+        errors.extend(_merge_declared_dependencies(dependency_lock, flow_declared_dependencies))
         sandbox = sandbox or flow_sandbox
 
     api_version = next_api_version(previous_manifest, api.input_schema, api.output_schema)
@@ -552,12 +669,8 @@ async def analyze_release(
             "output_schema": copy.deepcopy(api.output_schema),
             "request_example": copy.deepcopy(api.request_example),
             "response_example": copy.deepcopy(api.response_example),
-            "input_mapping": {
-                name: binding.model_dump(mode="json") for name, binding in api.input_mapping.items()
-            },
-            "output_mapping": {
-                name: binding.model_dump(mode="json") for name, binding in api.output_mapping.items()
-            },
+            "input_mapping": {name: binding.model_dump(mode="json") for name, binding in api.input_mapping.items()},
+            "output_mapping": {name: binding.model_dump(mode="json") for name, binding in api.output_mapping.items()},
             "openapi": build_openapi(
                 release_version=release_version,
                 api_version=api_version,
@@ -569,6 +682,7 @@ async def analyze_release(
         "services": sorted(services),
         "external_endpoints": sorted(endpoints),
         "secret_names": sorted(name for name in secrets if name),
+        "dependency_lock": dependency_lock,
         "knowledge_base_alias": next(iter(shared_knowledge_aliases), None),
         "sandbox": {
             "required": sandbox,
@@ -578,7 +692,8 @@ async def analyze_release(
         "build": {
             "architecture": config.architecture,
             "base_image_digest": config.base_image_digest,
-            "dependency_lock_status": "pending",
+            "dependency_lock_status": "worker-resolution-required",
+            "declared_dependency_count": sum(len(values) for values in dependency_lock.values()),
             "sbom_required": True,
             "checksums_required": True,
             "signing_enabled": config.features.signing,
