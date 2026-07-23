@@ -6,10 +6,12 @@ from .manifest import (
     canonical_digest,
     next_api_version,
 )
+from .sandbox import SandboxWorkerClient
 
 __all__ = [
     "BuildKitWorkerClient",
     "ReleaseAnalysis",
+    "SandboxWorkerClient",
     "WorkerArtifact",
     "WorkerBuildStatus",
     "analyze_release",

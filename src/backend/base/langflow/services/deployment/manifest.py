@@ -42,6 +42,7 @@ _SERVICE_NAMES = {
 }
 _MODEL_FIELDS = {"model", "model_id", "model_name", "llm_model", "embedding_model"}
 _KB_FIELDS = {"knowledge_base", "knowledge_base_name", "kb_name", "collection_name"}
+_RISKY_NODE_MARKERS = ("customcomponent", "pythonrepl", "pythoninterpreter", "shell", "subprocess")
 
 
 @dataclass(frozen=True)
@@ -194,13 +195,14 @@ def build_openapi(
 
 def _inspect_flow(
     version: FlowVersion,
-) -> tuple[dict[str, Any], list[str], list[str], set[str], set[str], set[str], bool]:
+) -> tuple[dict[str, Any], list[str], list[str], set[str], set[str], set[str], set[str], bool]:
     data = version.data
     if not isinstance(data, dict) or not isinstance(data.get("nodes"), list) or not isinstance(data.get("edges"), list):
         return (
             {},
             [f"Flow version {version.id} does not contain a valid nodes/edges graph"],
             [],
+            set(),
             set(),
             set(),
             set(),
@@ -213,6 +215,7 @@ def _inspect_flow(
     endpoints: set[str] = set()
     services: set[str] = set()
     models: set[str] = set()
+    allowed_sandbox_endpoints: set[str] = set()
     sandbox = False
 
     for node in data["nodes"]:
@@ -220,6 +223,7 @@ def _inspect_flow(
             continue
         node_type = _node_type(node)
         lowered_type = node_type.lower()
+        sandbox = sandbox or any(marker in lowered_type for marker in _RISKY_NODE_MARKERS)
         for marker, service in _SERVICE_NAMES.items():
             if marker in lowered_type:
                 services.add(service)
@@ -252,6 +256,7 @@ def _inspect_flow(
             for endpoint in deployment_metadata.get("internal_endpoints", []):
                 if isinstance(endpoint, str) and (safe_endpoint := _safe_endpoint(endpoint)):
                     endpoints.add(safe_endpoint)
+                    allowed_sandbox_endpoints.add(safe_endpoint)
 
         if isinstance(node_metadata, dict) and str(node_metadata.get("module", "")).startswith("custom_components."):
             sandbox = True
@@ -286,6 +291,7 @@ def _inspect_flow(
         secrets,
         endpoints,
         services,
+        allowed_sandbox_endpoints,
         sandbox,
     )
 
@@ -495,15 +501,23 @@ async def analyze_release(
     secrets = set(config.additional_secret_names)
     endpoints = {str(endpoint) for endpoint in config.external_endpoints}
     services: set[str] = set()
+    allowed_sandbox_endpoints: set[str] = set()
     sandbox = False
     for role, version in [
         ("agent", agent_version),
         ("ingestion", ingestion_version),
         *(("subflow", version) for version in subflows),
     ]:
-        entry, flow_errors, flow_warnings, flow_secrets, flow_endpoints, flow_services, flow_sandbox = _inspect_flow(
-            version
-        )
+        (
+            entry,
+            flow_errors,
+            flow_warnings,
+            flow_secrets,
+            flow_endpoints,
+            flow_services,
+            flow_allowed_sandbox_endpoints,
+            flow_sandbox,
+        ) = _inspect_flow(version)
         entry["role"] = role
         flow_entries.append(entry)
         errors.extend(flow_errors)
@@ -511,6 +525,7 @@ async def analyze_release(
         secrets.update(flow_secrets)
         endpoints.update(flow_endpoints)
         services.update(flow_services)
+        allowed_sandbox_endpoints.update(flow_allowed_sandbox_endpoints)
         sandbox = sandbox or flow_sandbox
 
     api_version = next_api_version(previous_manifest, api.input_schema, api.output_schema)
@@ -553,6 +568,7 @@ async def analyze_release(
         "sandbox": {
             "required": sandbox,
             "network_policy": "deny-by-default" if sandbox else "not-applicable",
+            "allowed_endpoints": sorted(allowed_sandbox_endpoints),
         },
         "build": {
             "architecture": config.architecture,

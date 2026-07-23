@@ -298,3 +298,43 @@ async def test_validate_on_prem_release_requires_api_component_mappings(
     assert response.status_code == status.HTTP_200_OK
     assert response.json()["manifest"] is None
     assert "Required API input fields are not mapped: message" in response.json()["errors"]
+
+
+async def test_validate_on_prem_release_routes_risky_flow_to_declared_sandbox_network(
+    client: AsyncClient,
+    logged_in_headers,
+):
+    risky = _node("repl", "PythonREPL")
+    risky["data"]["node"]["metadata"] = {
+        "deployment": {
+            "sandbox": True,
+            "internal_endpoints": ["https://models.internal/v1"],
+        }
+    }
+    agent_version_id = await _snapshot(
+        client,
+        logged_in_headers,
+        "sandbox-agent",
+        {
+            "nodes": [
+                _node("agent-input", "ChatInput", input_value=""),
+                _node("agent-output", "ChatOutput"),
+                _node("retrieval", "KnowledgeBase", knowledge_base="shared"),
+                risky,
+            ],
+            "edges": [],
+        },
+    )
+    _unused_agent, ingestion_version_id = await _root_versions(client, logged_in_headers)
+
+    response = await client.post(
+        "/api/v1/deployments/on-prem/releases/validate",
+        headers=logged_in_headers,
+        json=_release_payload(agent_version_id, ingestion_version_id),
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["errors"] == []
+    sandbox = response.json()["manifest"]["sandbox"]
+    assert sandbox["required"] is True
+    assert sandbox["allowed_endpoints"] == ["https://models.internal/v1"]

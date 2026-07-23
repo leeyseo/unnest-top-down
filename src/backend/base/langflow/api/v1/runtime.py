@@ -19,12 +19,14 @@ from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 import filetype
+import httpx
 from anyio import Path as AsyncPath
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, Form, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel
 from sqlmodel import col, select
+from starlette.background import BackgroundTask
 
 from langflow.api.utils import CurrentActiveUser, DbSession, DbSessionReadOnly, build_content_disposition
 from langflow.api.v1.endpoints import _run_flow_internal, simple_run_flow
@@ -40,6 +42,7 @@ from langflow.services.database.models.knowledge_base import KnowledgeBaseRecord
 from langflow.services.database.models.message.model import MessageTable
 from langflow.services.database.models.runtime_document import DocumentVersion, RuntimeDocument
 from langflow.services.database.models.user.model import User
+from langflow.services.deployment import SandboxWorkerClient
 from langflow.services.deps import (
     get_job_service,
     get_settings_service,
@@ -526,6 +529,66 @@ def _contract_output(release: DeploymentRelease, result: RunResponse) -> dict[st
     return response
 
 
+def _sandbox_payload(
+    release: DeploymentRelease,
+    flow: FlowRead,
+    input_request: SimplifiedAPIRequest,
+    current_user: User,
+) -> dict[str, Any]:
+    return {
+        "execution_boundary": "whole-flow",
+        "release_id": str(release.id),
+        "flow_version_id": str(release.agent_flow_version_id),
+        "user_id": str(current_user.id),
+        "flow": {
+            "id": str(flow.id),
+            "name": flow.name,
+            "data": copy.deepcopy(flow.data),
+        },
+        "request": input_request.model_dump(mode="json"),
+        "security": {
+            "run_as_non_root": True,
+            "read_only_root_filesystem": True,
+            "drop_capabilities": ["ALL"],
+            "network": "deny-by-default",
+            "allowed_endpoints": release.manifest.get("sandbox", {}).get("allowed_endpoints", []),
+        },
+    }
+
+
+async def _close_sandbox_stream(response: httpx.Response, client: SandboxWorkerClient) -> None:
+    await response.aclose()
+    await client.aclose()
+
+
+async def _run_in_sandbox(
+    *,
+    release: DeploymentRelease,
+    flow: FlowRead,
+    input_request: SimplifiedAPIRequest,
+    current_user: User,
+    stream: bool,
+):
+    try:
+        client = SandboxWorkerClient.from_env()
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    payload = _sandbox_payload(release, flow, input_request, current_user)
+    try:
+        if stream:
+            response = await client.stream(payload)
+            return StreamingResponse(
+                response.aiter_raw(),
+                media_type="text/event-stream",
+                background=BackgroundTask(_close_sandbox_stream, response, client),
+            )
+        async with client:
+            return RunResponse.model_validate(await client.run(payload))
+    except (httpx.HTTPError, TypeError, ValueError) as exc:
+        await client.aclose()
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Sandbox worker execution failed") from exc
+
+
 async def _run_agent(
     *,
     api_version: str,
@@ -538,6 +601,17 @@ async def _run_agent(
 ):
     release, flow = await _immutable_agent_flow(session, api_version)
     input_request = _contract_input(release, payload)
+    if release.manifest.get("sandbox", {}).get("required") is True:
+        result = await _run_in_sandbox(
+            release=release,
+            flow=flow,
+            input_request=input_request,
+            current_user=current_user,
+            stream=stream,
+        )
+        if stream:
+            return result
+        return _contract_output(release, result)
     # The route accepts no flow identifier: successful authentication grants
     # execution only of the release-pinned Agent version.
     result = await _run_flow_internal(
