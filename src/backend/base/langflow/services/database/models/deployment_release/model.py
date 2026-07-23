@@ -44,6 +44,28 @@ class DeploymentRelease(SQLModel, table=True):  # type: ignore[call-arg]
     )
 
 
+class DeploymentReleaseFlowVersion(SQLModel, table=True):  # type: ignore[call-arg]
+    __tablename__ = "deployment_release_flow_version"
+    __table_args__ = (
+        UniqueConstraint(
+            "release_id",
+            "flow_version_id",
+            name="uq_deployment_release_flow_version",
+        ),
+    )
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    release_id: UUID = Field(
+        sa_column=Column(
+            sa.Uuid(), ForeignKey("deployment_release.id", ondelete="CASCADE"), nullable=False, index=True
+        )
+    )
+    flow_version_id: UUID = Field(
+        sa_column=Column(sa.Uuid(), ForeignKey("flow_version.id", ondelete="RESTRICT"), nullable=False, index=True)
+    )
+    role: str = Field(nullable=False)
+
+
 class DeploymentBuild(SQLModel, table=True):  # type: ignore[call-arg]
     __tablename__ = "deployment_build"
     __table_args__ = (UniqueConstraint("release_id", "architecture", name="uq_deployment_build_release_arch"),)

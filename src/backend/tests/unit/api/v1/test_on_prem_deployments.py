@@ -107,6 +107,12 @@ async def test_create_on_prem_release_from_saved_versions(client: AsyncClient, l
     build = builds.json()["builds"][0]
     assert build["status"] == "pending"
 
+    delete = await client.delete(
+        f"/api/v1/flows/{body['manifest']['flows'][0]['flow_id']}/versions/{agent_version_id}",
+        headers=logged_in_headers,
+    )
+    assert delete.status_code == status.HTTP_409_CONFLICT
+
     class FakeWorker:
         payload = None
 

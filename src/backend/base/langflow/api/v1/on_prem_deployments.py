@@ -26,6 +26,7 @@ from langflow.services.database.models.deployment_release import (
     DeploymentArtifact,
     DeploymentBuild,
     DeploymentRelease,
+    DeploymentReleaseFlowVersion,
 )
 from langflow.services.database.models.flow_version.crud import get_flow_version_entries_by_ids
 from langflow.services.deployment import (
@@ -249,6 +250,21 @@ async def create_release(
     except IntegrityError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Release version already exists") from exc
 
+    attached_versions = {
+        payload.agent_flow_version_id: "agent",
+        payload.ingestion_flow_version_id: "ingestion",
+        **dict.fromkeys(analysis.subflow_version_ids, "subflow"),
+    }
+    session.add_all(
+        [
+            DeploymentReleaseFlowVersion(
+                release_id=release.id,
+                flow_version_id=version_id,
+                role=role,
+            )
+            for version_id, role in attached_versions.items()
+        ]
+    )
     session.add(
         DeploymentBuild(
             release_id=release.id,

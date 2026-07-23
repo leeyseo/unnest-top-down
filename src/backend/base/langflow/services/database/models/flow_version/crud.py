@@ -7,6 +7,10 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlmodel import col, delete, func, select
 
 from langflow.services.database.models.deployment.model import Deployment
+from langflow.services.database.models.deployment_release.model import (
+    DeploymentRelease,
+    DeploymentReleaseFlowVersion,
+)
 from langflow.services.database.models.flow_version.exceptions import (
     FlowVersionConflictError,
     FlowVersionDeployedError,
@@ -114,12 +118,14 @@ async def create_flow_version_entry(
             )
             .distinct()
         )
+        released_version_ids = select(DeploymentReleaseFlowVersion.flow_version_id)
         version_ids_to_prune = (
             await session.exec(
                 select(FlowVersion.id)
                 .where(
                     FlowVersion.flow_id == flow_id,
                     col(FlowVersion.id).not_in(deployed_version_ids),
+                    col(FlowVersion.id).not_in(released_version_ids),
                 )
                 .order_by(col(FlowVersion.version_number).desc())
                 .offset(max_entries)
@@ -339,6 +345,23 @@ async def has_deployment_attachments(
     return False
 
 
+async def has_release_attachments(
+    session: AsyncSession,
+    flow_version_id: UUID,
+    user_id: UUID | None = None,
+) -> bool:
+    stmt = select(func.count(DeploymentReleaseFlowVersion.id)).where(
+        DeploymentReleaseFlowVersion.flow_version_id == flow_version_id
+    )
+    if user_id is not None:
+        stmt = stmt.where(
+            DeploymentReleaseFlowVersion.release_id.in_(
+                select(DeploymentRelease.id).where(DeploymentRelease.user_id == user_id)
+            )
+        )
+    return int((await session.exec(stmt)).one() or 0) > 0
+
+
 async def delete_flow_version_entry(
     session: AsyncSession,
     version_id: UUID,
@@ -349,10 +372,12 @@ async def delete_flow_version_entry(
         msg = f"Version entry {version_id} not found"
         raise FlowVersionNotFoundError(msg)
 
-    if await has_deployment_attachments(session, version_id, user_id=user_id):
+    if await has_deployment_attachments(session, version_id, user_id=user_id) or await has_release_attachments(
+        session, version_id, user_id=user_id
+    ):
         msg = (
-            f"Version entry {version_id} is attached to one or more deployments "
-            f"and cannot be deleted. Remove its deployment attachment rows first."
+            f"Version entry {version_id} is attached to one or more deployments or releases "
+            f"and cannot be deleted. Remove its attachment rows first."
         )
         raise FlowVersionDeployedError(msg)
 

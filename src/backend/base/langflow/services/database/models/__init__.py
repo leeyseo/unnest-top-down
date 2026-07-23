@@ -18,6 +18,7 @@ from .deployment_release import (
     DeploymentArtifact,
     DeploymentBuild,
     DeploymentRelease,
+    DeploymentReleaseFlowVersion,
 )
 from .file import File
 from .flow import Flow
@@ -51,6 +52,7 @@ __all__ = [
     "DeploymentBuild",
     "DeploymentProviderAccount",
     "DeploymentRelease",
+    "DeploymentReleaseFlowVersion",
     "File",
     "Flow",
     "FlowVersion",

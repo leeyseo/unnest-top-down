@@ -3,6 +3,7 @@ from .model import (
     DeploymentArtifact,
     DeploymentBuild,
     DeploymentRelease,
+    DeploymentReleaseFlowVersion,
 )
 
 __all__ = [
@@ -10,4 +11,5 @@ __all__ = [
     "DeploymentArtifact",
     "DeploymentBuild",
     "DeploymentRelease",
+    "DeploymentReleaseFlowVersion",
 ]
