@@ -680,6 +680,10 @@ def create_app(*, runtime_only: bool = False):
     app.add_middleware(
         ContentSizeLimitMiddleware,
     )
+    if runtime_only:
+        from langflow.services.runtime_metrics import RuntimeMetricsMiddleware
+
+        app.add_middleware(RuntimeMetricsMiddleware)
 
     if not runtime_only:
         add_sentry_middleware(app)

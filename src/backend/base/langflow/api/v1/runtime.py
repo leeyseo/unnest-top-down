@@ -12,6 +12,7 @@ import tempfile
 import zipfile
 from collections.abc import AsyncGenerator
 from contextlib import suppress
+from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
 from struct import pack
@@ -22,10 +23,11 @@ import filetype
 import httpx
 from anyio import Path as AsyncPath
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, Form, HTTPException, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from jsonschema import Draft202012Validator
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel
-from sqlmodel import col, select
+from sqlmodel import col, func, select
 from starlette.background import BackgroundTask
 
 from langflow.api.utils import CurrentActiveUser, DbSession, DbSessionReadOnly, build_content_disposition
@@ -45,6 +47,7 @@ from langflow.services.database.models.user.model import User
 from langflow.services.deployment import SandboxWorkerClient
 from langflow.services.deps import (
     get_job_service,
+    get_queue_service,
     get_settings_service,
     get_storage_service,
     get_task_service,
@@ -56,6 +59,13 @@ from langflow.services.runtime_document import (
     move_document_to_trash,
     register_document,
     restore_document,
+)
+from langflow.services.runtime_metrics import (
+    INGESTION_JOBS,
+    LICENSE_VALID,
+    QUEUE_VALUES,
+    QUOTA_REJECTIONS,
+    SETUP_COMPLETE,
 )
 from langflow.services.runtime_quota import RuntimeQuotaExceededError, get_runtime_quota_service
 from langflow.services.storage.service import StorageService
@@ -128,6 +138,7 @@ async def _runtime_api_user(
     try:
         await quota.acquire(api_key)
     except RuntimeQuotaExceededError as exc:
+        QUOTA_REJECTIONS.labels(exc.limit).inc()
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"API key {exc.limit} limit exceeded",
@@ -634,6 +645,35 @@ async def _run_agent(
 async def ready(session: DbSessionReadOnly) -> dict[str, str]:
     release = await _release_for_api(session)
     return {"status": "ok", "release_version": release.version}
+
+
+@router.get("/metrics")
+async def runtime_metrics(session: DbSessionReadOnly) -> Response:
+    INGESTION_JOBS.clear()
+    rows = (
+        await session.exec(
+            select(Job.status, func.count(Job.job_id))
+            .where(Job.type == JobType.INGESTION)
+            .group_by(Job.status)
+        )
+    ).all()
+    for job_status, count in rows:
+        INGESTION_JOBS.labels(job_status.value).set(count)
+
+    QUEUE_VALUES.clear()
+    for name, value in get_queue_service().metrics_snapshot().items():
+        if isinstance(value, int | float):
+            QUEUE_VALUES.labels(name).set(value)
+    SETUP_COMPLETE.set(int(_setup_complete()))
+    license_expires_at = os.getenv("UNNEST_LICENSE_EXPIRES_AT")
+    try:
+        expires_at = datetime.fromisoformat(license_expires_at.replace("Z", "+00:00")) if license_expires_at else None
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        LICENSE_VALID.set(int(expires_at is not None and expires_at > datetime.now(timezone.utc)))
+    except ValueError:
+        LICENSE_VALID.set(0)
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @router.post("/api/{api_version}/agent/run", response_model=None)

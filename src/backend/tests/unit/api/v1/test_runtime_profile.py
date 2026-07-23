@@ -32,6 +32,7 @@ def test_runtime_profile_mounts_only_deployment_routes(monkeypatch):
     assert "/api/v1/admin/api-keys" in paths
     assert "/health" in paths
     assert "/ready" in paths
+    assert "/metrics" in paths
     assert not any(
         forbidden in path
         for path in paths
