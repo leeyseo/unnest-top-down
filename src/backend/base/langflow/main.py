@@ -217,7 +217,7 @@ def get_lifespan(*, fix_migration=False, version=None, runtime_only: bool = Fals
             # connection pool on first use (the master disposed its engine
             # before fork). The call is idempotent: factory registration and
             # migration application both no-op when already done.
-            await initialize_services(fix_migration=fix_migration)
+            await initialize_services(fix_migration=fix_migration, skip_superuser_setup=runtime_only)
             await logger.adebug(f"Services initialized in {asyncio.get_event_loop().time() - start_time:.2f}s")
 
             # Start the telemetry writer (no-op when telemetry_writer_enabled is False).

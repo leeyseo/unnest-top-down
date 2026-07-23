@@ -31,6 +31,7 @@ from .knowledge_base import KnowledgeBaseRecord, KnowledgeBaseStatus
 from .memory_base import MemoryBase, MemoryBaseSession, MemoryBaseWorkflowRun, MessageIngestionRecord
 from .message import MessageTable
 from .runtime_audit import RuntimeAuditCheckpoint, RuntimeAuditEvent
+from .runtime_configuration import RuntimeConfiguration
 from .runtime_document import DocumentVersion, IndexGeneration, RuntimeDocument
 from .runtime_schedule import RuntimeSchedule
 from .traces.model import SpanTable, TraceTable
@@ -75,6 +76,7 @@ __all__ = [
     "MessageTable",
     "RuntimeAuditCheckpoint",
     "RuntimeAuditEvent",
+    "RuntimeConfiguration",
     "RuntimeDocument",
     "RuntimeSchedule",
     "SSOConfig",

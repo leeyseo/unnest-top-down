@@ -28,7 +28,8 @@ from fastapi.responses import Response, StreamingResponse
 from jsonschema import Draft202012Validator
 from lfx.log.logger import logger
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from pydantic import BaseModel, Field, SecretStr
+from pydantic import BaseModel, Field, HttpUrl, SecretStr, field_validator
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, func, select
 from starlette.background import BackgroundTask
 
@@ -45,6 +46,7 @@ from langflow.services.database.models.jobs.model import Job, JobStatus, JobType
 from langflow.services.database.models.knowledge_base import KnowledgeBaseRecord
 from langflow.services.database.models.message.model import MessageTable
 from langflow.services.database.models.runtime_audit import RuntimeAuditCheckpoint, RuntimeAuditEvent
+from langflow.services.database.models.runtime_configuration import RuntimeConfiguration
 from langflow.services.database.models.runtime_document import DocumentVersion, RuntimeDocument
 from langflow.services.database.models.runtime_schedule import RuntimeSchedule
 from langflow.services.database.models.user.model import User
@@ -80,6 +82,11 @@ from langflow.services.runtime_metrics import (
 )
 from langflow.services.runtime_quota import RuntimeQuotaExceededError, get_runtime_quota_service
 from langflow.services.runtime_scheduler import next_cron_run
+from langflow.services.runtime_setup import (
+    encrypt_runtime_secrets,
+    load_or_create_master_key,
+    master_key_fingerprint,
+)
 from langflow.services.storage.service import StorageService
 
 router = APIRouter(tags=["Runtime"])
@@ -166,6 +173,23 @@ class RuntimeUserRead(BaseModel):
     is_active: bool
     created_at: datetime
     last_login_at: datetime | None
+
+
+class RuntimeSetupRequest(BaseModel):
+    admin_username: str = Field(min_length=1, max_length=255)
+    admin_password: SecretStr = Field(min_length=12)
+    model_endpoint: HttpUrl | None = None
+    storage_endpoint: HttpUrl | None = None
+    tls_certificate_configured: bool = False
+    secret_values: dict[str, SecretStr] = Field(default_factory=dict)
+
+    @field_validator("model_endpoint", "storage_endpoint")
+    @classmethod
+    def endpoint_without_credentials(cls, value: HttpUrl | None) -> HttpUrl | None:
+        if value and (value.username or value.password or value.query or value.fragment):
+            msg = "Runtime endpoints must not contain credentials, query parameters, or fragments"
+            raise ValueError(msg)
+        return value
 
 
 def _runtime_user_read(user: User) -> RuntimeUserRead:
@@ -261,13 +285,15 @@ async def _runtime_api_user(
 RuntimeApiUser = Annotated[User, Depends(_runtime_api_user)]
 
 
-def _setup_complete() -> bool:
-    # ponytail: replace this process-level gate when encrypted runtime settings land.
-    return os.getenv("UNNEST_RUNTIME_SETUP_COMPLETE", "").lower() in {"1", "true", "yes", "on"}
+async def _setup_complete(session: DbSessionReadOnly) -> bool:
+    if os.getenv("UNNEST_RUNTIME_SETUP_COMPLETE", "").lower() in {"1", "true", "yes", "on"}:
+        return True
+    configuration = await session.get(RuntimeConfiguration, 1)
+    return bool(configuration and configuration.setup_complete)
 
 
 async def _release_for_api(session: DbSessionReadOnly, api_version: str | None = None) -> DeploymentRelease:
-    if not _setup_complete():
+    if not await _setup_complete(session):
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Initial setup is incomplete")
     statement = select(DeploymentRelease)
     if api_version is not None:
@@ -866,6 +892,120 @@ async def execute_scheduled_agent(schedule_id: UUID) -> None:
         await background_tasks()
 
 
+async def _latest_runtime_release(session: DbSessionReadOnly) -> DeploymentRelease | None:
+    return (
+        await session.exec(select(DeploymentRelease).order_by(col(DeploymentRelease.created_at).desc()))
+    ).first()
+
+
+@router.get("/api/v1/setup/status")
+async def runtime_setup_status(session: DbSessionReadOnly) -> dict[str, Any]:
+    release = await _latest_runtime_release(session)
+    configuration = await session.get(RuntimeConfiguration, 1)
+    required_secrets = release.manifest.get("secret_names", []) if release else []
+    return {
+        "complete": await _setup_complete(session),
+        "release_version": release.version if release else None,
+        "license": runtime_license_status(release.version if release else None),
+        "required_secret_names": required_secrets if isinstance(required_secrets, list) else [],
+        "configured_secret_names": sorted(
+            configuration.settings.get("secret_names", []) if configuration else []
+        ),
+    }
+
+
+@router.post("/api/v1/setup", status_code=status.HTTP_201_CREATED)
+async def complete_runtime_setup(
+    payload: RuntimeSetupRequest,
+    session: DbSession,
+) -> dict[str, Any]:
+    if await session.get(RuntimeConfiguration, 1):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Initial setup is already complete")
+    release = await _latest_runtime_release(session)
+    if release is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Runtime release is unavailable")
+    license_status = runtime_license_status(release.version)
+    if not license_status["valid"]:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Offline license is {license_status['reason']}",
+        )
+    if release.config.get("tls") == "institution" and not payload.tls_certificate_configured:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Institution TLS certificate must be configured",
+        )
+
+    required = release.manifest.get("secret_names", [])
+    required_names = {str(name) for name in required} if isinstance(required, list) else set()
+    supplied_names = set(payload.secret_values)
+    if missing := sorted(required_names - supplied_names):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Required runtime secrets are missing: {', '.join(missing)}",
+        )
+    if unexpected := sorted(supplied_names - required_names):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Runtime secrets are not declared by the release: {', '.join(unexpected)}",
+        )
+
+    username = payload.admin_username.strip()
+    if not username:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Admin username is required")
+    if (await session.exec(select(User.id).where(User.username == username))).first():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
+
+    try:
+        key = load_or_create_master_key()
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Runtime master key volume is unavailable",
+        ) from exc
+    secrets = {name: value.get_secret_value() for name, value in payload.secret_values.items()}
+    admin = User(
+        username=username,
+        password=get_auth_service().get_password_hash(payload.admin_password.get_secret_value()),
+        is_superuser=True,
+        is_active=True,
+    )
+    session.add(admin)
+    try:
+        await session.flush()
+        configuration = RuntimeConfiguration(
+            id=1,
+            setup_complete=True,
+            settings={
+                "model_endpoint": str(payload.model_endpoint) if payload.model_endpoint else None,
+                "storage_endpoint": str(payload.storage_endpoint) if payload.storage_endpoint else None,
+                "tls_certificate_configured": payload.tls_certificate_configured,
+                "secret_names": sorted(secrets),
+            },
+            encrypted_secrets=encrypt_runtime_secrets(key, secrets),
+            master_key_fingerprint=master_key_fingerprint(key),
+            created_by_user_id=admin.id,
+        )
+        session.add(configuration)
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Initial setup is already complete") from exc
+    await append_runtime_audit_event(
+        session,
+        event_type="runtime.setup.completed",
+        actor_user_id=admin.id,
+        resource_type="runtime_configuration",
+        resource_id="1",
+        details={
+            "release_version": release.version,
+            "secret_names": sorted(secrets),
+            "tls_certificate_configured": payload.tls_certificate_configured,
+        },
+    )
+    return await runtime_setup_status(session)
+
+
 @router.get("/ready")
 async def ready(session: DbSessionReadOnly) -> dict[str, str]:
     release = await _release_for_api(session)
@@ -894,7 +1034,7 @@ async def runtime_metrics(session: DbSessionReadOnly) -> Response:
     for name, value in get_queue_service().metrics_snapshot().items():
         if isinstance(value, int | float):
             QUEUE_VALUES.labels(name).set(value)
-    SETUP_COMPLETE.set(int(_setup_complete()))
+    SETUP_COMPLETE.set(int(await _setup_complete(session)))
     LICENSE_VALID.set(int(runtime_license_status()["valid"]))
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
