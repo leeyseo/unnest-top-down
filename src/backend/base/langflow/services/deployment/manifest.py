@@ -8,6 +8,7 @@ import json
 import re
 import warnings as python_warnings
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse, urlunparse
 from uuid import UUID
@@ -25,7 +26,11 @@ from langflow.services.database.models.flow_version.model import FlowVersion
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
 
-    from langflow.api.v1.schemas.on_prem_deployments import AgentApiContract, OnPremDeploymentConfig
+    from langflow.api.v1.schemas.on_prem_deployments import (
+        AcceptanceTestCreate,
+        AgentApiContract,
+        OnPremDeploymentConfig,
+    )
 
 _SUBFLOW_TYPES = {"FlowTool", "RunFlow"}
 _SERVICE_NAMES = {
@@ -48,6 +53,8 @@ _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _DEPENDENCY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:-]*$")
 _UNPINNED_VERSION_RE = re.compile(r"[<>=!~*\s]")
 _DEPENDENCY_KINDS = ("python_packages", "os_packages", "binaries")
+_MIN_HTTP_STATUS = 100
+_MAX_HTTP_STATUS = 599
 
 
 @dataclass(frozen=True)
@@ -550,6 +557,39 @@ def _validate_api_mappings(agent_data: dict[str, Any], api: AgentApiContract) ->
     return errors
 
 
+def _acceptance_errors(tests: list[dict[str, Any]]) -> list[str]:
+    errors: list[str] = []
+    for test in tests:
+        name = str(test.get("name") or "<unnamed>")
+        request = test.get("request")
+        expected = test.get("expected")
+        if not isinstance(request, dict) or not isinstance(expected, dict):
+            errors.append(f"Acceptance test '{name}' request and expected values must be objects")
+            continue
+        path = request.get("path")
+        parsed = urlparse(path) if isinstance(path, str) else None
+        if (
+            parsed is None
+            or not path.startswith("/")
+            or path.startswith("//")
+            or ".." in PurePosixPath(parsed.path).parts
+            or parsed.scheme
+            or parsed.netloc
+            or parsed.query
+            or parsed.fragment
+        ):
+            errors.append(f"Acceptance test '{name}' path must be a safe absolute runtime path")
+        method = str(request.get("method") or ("POST" if "body" in request else "GET")).upper()
+        if method not in {"GET", "POST"}:
+            errors.append(f"Acceptance test '{name}' method must be GET or POST")
+        expected_status = expected.get("status")
+        if not isinstance(expected_status, int) or not _MIN_HTTP_STATUS <= expected_status <= _MAX_HTTP_STATUS:
+            errors.append(f"Acceptance test '{name}' expected.status must be a valid HTTP status")
+    if _contains_plaintext_secret(tests):
+        errors.append("Acceptance tests must not contain plaintext credentials")
+    return errors
+
+
 async def analyze_release(
     session: AsyncSession,
     *,
@@ -559,6 +599,7 @@ async def analyze_release(
     ingestion_flow_version_id: UUID,
     config: OnPremDeploymentConfig,
     api: AgentApiContract,
+    acceptance_tests: list[AcceptanceTestCreate] | None = None,
     previous_manifest: dict[str, Any] | None = None,
 ) -> ReleaseAnalysis:
     root_versions = (
@@ -646,6 +687,31 @@ async def analyze_release(
         sandbox = sandbox or flow_sandbox
 
     api_version = next_api_version(previous_manifest, api.input_schema, api.output_schema)
+    acceptance_payload = (
+        [test.model_dump(mode="json") for test in acceptance_tests]
+        if acceptance_tests
+        else [
+            {
+                "name": "health",
+                "required": True,
+                "request": {"path": "/health"},
+                "expected": {"status": 200},
+            },
+            {
+                "name": "agent-smoke",
+                "required": True,
+                "request": {
+                    "path": f"/api/{api_version}/agent/run",
+                    "body": copy.deepcopy(api.request_example),
+                },
+                "expected": {
+                    "status": 200,
+                    "body": copy.deepcopy(api.response_example),
+                },
+            },
+        ]
+    )
+    errors.extend(_acceptance_errors(acceptance_payload))
     orchestrator_files = (
         ["compose/compose.yml"]
         if config.orchestrator == "compose"
@@ -660,6 +726,7 @@ async def analyze_release(
                 "flows": flow_entries,
                 "config": config.model_dump(mode="json"),
                 "api": api.model_dump(mode="json"),
+                "acceptance_tests": acceptance_payload,
             }
         ),
         "flows": flow_entries,
@@ -683,6 +750,7 @@ async def analyze_release(
         "external_endpoints": sorted(endpoints),
         "secret_names": sorted(name for name in secrets if name),
         "dependency_lock": dependency_lock,
+        "acceptance_tests": acceptance_payload,
         "knowledge_base_alias": next(iter(shared_knowledge_aliases), None),
         "sandbox": {
             "required": sandbox,
@@ -706,6 +774,7 @@ async def analyze_release(
                 "openapi/openapi.json",
                 "reports/sbom.cdx.json",
                 "reports/trivy.json",
+                "tests/acceptance.json",
                 "bin/unnestctl-amd64",
                 "bin/unnestctl-arm64",
                 "license/license.json",

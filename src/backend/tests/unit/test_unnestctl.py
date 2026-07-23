@@ -4,12 +4,19 @@ import json
 import sqlite3
 from pathlib import Path
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from langflow.services.runtime_backup import RuntimeBackupFile, create_runtime_backup
 from langflow.services.runtime_setup import generate_age_recovery_key
-from langflow.unnestctl import PackageValidationError, app, preflight, verify_package
+from langflow.unnestctl import (
+    PackageValidationError,
+    app,
+    preflight,
+    run_acceptance,
+    verify_package,
+)
 from typer.testing import CliRunner
 
 
@@ -29,10 +36,25 @@ def _write_signed_package(root: Path) -> Path:
             serialization.Encoding.PEM,
             serialization.PublicFormat.SubjectPublicKeyInfo,
         ),
+        "tests/acceptance.json": json.dumps(
+            [
+                {
+                    "name": "health",
+                    "required": True,
+                    "request": {"path": "/health"},
+                    "expected": {"status": 200},
+                },
+                {
+                    "name": "agent-smoke",
+                    "required": True,
+                    "request": {"path": "/api/v1/agent/run", "body": {"message": "hello"}},
+                    "expected": {"status": 200, "body": {"answer": "hello"}},
+                },
+            ],
+            sort_keys=True,
+        ).encode(),
     }
-    files["license/license.sig"] = base64.b64encode(
-        license_key.sign(files["license/license.json"])
-    )
+    files["license/license.sig"] = base64.b64encode(license_key.sign(files["license/license.json"]))
     manifest = {
         "provider": "unnest-on-prem",
         "release_version": "1.0.0",
@@ -44,6 +66,7 @@ def _write_signed_package(root: Path) -> Path:
             "resources": {"cpu": 1, "memory_bytes": 1, "disk_bytes": 1},
         },
         "external_endpoints": [],
+        "acceptance_tests": json.loads(files["tests/acceptance.json"]),
         "package": {
             "required_files": [
                 "manifest/release.json",
@@ -52,22 +75,20 @@ def _write_signed_package(root: Path) -> Path:
                 "keys/license.pub",
                 "keys/cosign.pub",
                 "signatures/release-manifest.sig",
+                "tests/acceptance.json",
             ],
             "required_globs": ["images/*.tar"],
         },
     }
     files["manifest/release.json"] = json.dumps(manifest, sort_keys=True).encode()
-    files["signatures/release-manifest.sig"] = base64.b64encode(
-        signing_key.sign(files["manifest/release.json"])
-    )
+    files["signatures/release-manifest.sig"] = base64.b64encode(signing_key.sign(files["manifest/release.json"]))
     for relative, content in files.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
 
     checksum = "".join(
-        f"{hashlib.sha256(content).hexdigest()}  {relative}\n"
-        for relative, content in sorted(files.items())
+        f"{hashlib.sha256(content).hexdigest()}  {relative}\n" for relative, content in sorted(files.items())
     ).encode()
     (root / "checksums.sha256").write_bytes(checksum)
     signature_path = root / "signatures" / "checksums.sig"
@@ -100,6 +121,37 @@ def test_preflight_rejects_non_linux_host(tmp_path, monkeypatch):
 
     with pytest.raises(PackageValidationError, match="Only Linux"):
         preflight(package)
+
+
+def test_acceptance_runs_signed_required_tests_and_sends_api_key(tmp_path):
+    package = _write_signed_package(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200)
+        assert request.headers["x-api-key"] == "runtime-key"
+        return httpx.Response(200, json={"answer": "hello", "metadata": {"version": "1.0.0"}})
+
+    results = run_acceptance(
+        package,
+        base_url="https://runtime.internal",
+        api_key="runtime-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert [result["passed"] for result in results] == [True, True]
+
+
+def test_acceptance_fails_when_required_response_does_not_match(tmp_path):
+    package = _write_signed_package(tmp_path)
+    transport = httpx.MockTransport(lambda _request: httpx.Response(503))
+
+    with pytest.raises(PackageValidationError, match="Required acceptance test failed: health"):
+        run_acceptance(
+            package,
+            base_url="https://runtime.internal",
+            transport=transport,
+        )
 
 
 def test_restore_command_requires_stopped_runtime_and_restores_offline_state(tmp_path, monkeypatch):

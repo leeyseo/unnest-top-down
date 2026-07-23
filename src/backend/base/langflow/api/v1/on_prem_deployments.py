@@ -119,9 +119,7 @@ async def _owned_artifact(
 
 
 async def _build_read(session: DbSession | DbSessionReadOnly, build: DeploymentBuild) -> DeploymentBuildRead:
-    artifacts = (
-        await session.exec(select(DeploymentArtifact).where(DeploymentArtifact.build_id == build.id))
-    ).all()
+    artifacts = (await session.exec(select(DeploymentArtifact).where(DeploymentArtifact.build_id == build.id))).all()
     return DeploymentBuildRead(
         id=build.id,
         release_id=build.release_id,
@@ -131,9 +129,7 @@ async def _build_read(session: DbSession | DbSessionReadOnly, build: DeploymentB
         logs=build.logs,
         scan_report=build.scan_report,
         critical_override_reason=build.critical_override_reason,
-        artifacts=[
-            DeploymentArtifactRead.model_validate(artifact, from_attributes=True) for artifact in artifacts
-        ],
+        artifacts=[DeploymentArtifactRead.model_validate(artifact, from_attributes=True) for artifact in artifacts],
     )
 
 
@@ -167,9 +163,7 @@ async def _apply_worker_status(
     session.add(build)
     if worker.status != "succeeded":
         return
-    existing = (
-        await session.exec(select(DeploymentArtifact).where(DeploymentArtifact.build_id == build.id))
-    ).all()
+    existing = (await session.exec(select(DeploymentArtifact).where(DeploymentArtifact.build_id == build.id))).all()
     for artifact in existing:
         await session.delete(artifact)
     if existing:
@@ -220,6 +214,7 @@ async def _analyze(
         ingestion_flow_version_id=payload.ingestion_flow_version_id,
         config=payload.config,
         api=payload.api,
+        acceptance_tests=payload.acceptance_tests,
         previous_manifest=await _latest_manifest(session, current_user.id),
     )
 
@@ -300,17 +295,7 @@ async def create_release(
             status="pending",
         )
     )
-    tests = payload.acceptance_tests or [
-        AcceptanceTestCreate(name="health", request={"path": "/health"}, expected={"status": 200}),
-        AcceptanceTestCreate(
-            name="agent-smoke",
-            request={
-                "path": f"/api/{release.api_version}/agent/run",
-                "body": payload.api.request_example,
-            },
-            expected={"status": 200, "body": payload.api.response_example},
-        ),
-    ]
+    tests = [AcceptanceTestCreate.model_validate(value) for value in release.manifest["acceptance_tests"]]
     session.add_all(
         [
             DeploymentAcceptanceTest(
@@ -544,8 +529,7 @@ async def push_build_to_registry(
         expires_at=(
             None
             if pinned
-            else datetime.now(timezone.utc)
-            + timedelta(days=int(release.config.get("retention", {}).get("days", 30)))
+            else datetime.now(timezone.utc) + timedelta(days=int(release.config.get("retention", {}).get("days", 30)))
         ),
     )
     session.add(artifact)

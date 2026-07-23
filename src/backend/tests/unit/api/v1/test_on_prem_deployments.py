@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 from langflow.services.deployment import WorkerArtifact, WorkerBuildStatus, next_api_version
+from langflow.services.deployment.manifest import _acceptance_errors
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
@@ -35,6 +36,25 @@ def test_output_breaking_change_increments_api_version():
     changed_output = {"type": "object", "properties": {"answer": {"type": "object"}}}
 
     assert next_api_version(previous, previous["api"]["input_schema"], changed_output) == "v2"
+
+
+def test_acceptance_contract_rejects_unsafe_paths_and_plaintext_credentials():
+    errors = _acceptance_errors(
+        [
+            {
+                "name": "unsafe",
+                "required": True,
+                "request": {
+                    "path": "/health/../admin",
+                    "body": {"api_key": "do-not-package"},
+                },
+                "expected": {"status": 200},
+            }
+        ]
+    )
+
+    assert any("safe absolute runtime path" in error for error in errors)
+    assert "Acceptance tests must not contain plaintext credentials" in errors
 
 
 async def _snapshot(client: AsyncClient, headers: dict[str, str], name: str, data: dict[str, Any]) -> str:
@@ -134,6 +154,13 @@ async def test_create_on_prem_release_from_saved_versions(
     assert [flow["role"] for flow in body["manifest"]["flows"]] == ["agent", "ingestion"]
     assert body["manifest"]["secret_names"] == []
     assert body["manifest"]["api"]["input_mapping"]["message"]["component_id"] == "agent-input"
+    assert body["manifest"]["acceptance_tests"][0] == {
+        "name": "health",
+        "required": True,
+        "request": {"path": "/health"},
+        "expected": {"status": 200},
+    }
+    assert "tests/acceptance.json" in body["manifest"]["package"]["required_files"]
     assert body["manifest"]["build"]["sbom_required"] is True
     assert body["manifest"]["build"]["unnestctl_targets"] == ["linux-amd64", "linux-arm64"]
     builds = await client.get(
@@ -216,6 +243,7 @@ async def test_create_on_prem_release_from_saved_versions(
     assert submitted.status_code == status.HTTP_200_OK
     assert submitted.json()["status"] == "queued"
     assert worker.payload["reproducible"] == {"source_date_epoch": 0, "sort_files": True}
+    assert worker.payload["manifest"]["acceptance_tests"] == body["manifest"]["acceptance_tests"]
 
     synced = await client.post(
         f"/api/v1/deployments/on-prem/releases/{body['id']}/builds/{build['id']}/sync",

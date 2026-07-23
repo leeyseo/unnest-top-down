@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import httpx
 import typer
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
@@ -27,6 +28,9 @@ from langflow.services.runtime_backup import RuntimeBackupError, restore_runtime
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 SUPPORTED_ARCHITECTURES = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
 SHA256_HEX_LENGTH = 64
+MAX_ACCEPTANCE_TESTS = 100
+MIN_HTTP_STATUS = 100
+MAX_HTTP_STATUS = 599
 
 
 class PackageValidationError(ValueError):
@@ -68,9 +72,7 @@ def verify_checksums(package: Path) -> set[str]:
         except ValueError as exc:
             raise PackageValidationError("Invalid checksum entry") from exc
         relative = relative.removeprefix("*")
-        if len(digest) != SHA256_HEX_LENGTH or any(
-            character not in "0123456789abcdef" for character in digest
-        ):
+        if len(digest) != SHA256_HEX_LENGTH or any(character not in "0123456789abcdef" for character in digest):
             raise PackageValidationError(f"Invalid SHA-256 digest for {relative}")
         path = _package_file(package, relative)
         if not path.is_file():
@@ -134,9 +136,7 @@ def verify_package(package: Path) -> dict[str, Any]:
     for pattern in contract.get("required_globs", []):
         matches = list(package.glob(pattern)) if isinstance(pattern, str) and ".." not in Path(pattern).parts else []
         validated_matches = [
-            path
-            for path in matches
-            if _package_file(package, str(path.relative_to(package))).is_file()
+            path for path in matches if _package_file(package, str(path.relative_to(package))).is_file()
         ]
         if not validated_matches:
             raise PackageValidationError(f"Required package content is missing: {pattern}")
@@ -156,6 +156,15 @@ def verify_package(package: Path) -> dict[str, Any]:
             package / "signatures" / "checksums.sig",
             (package / "checksums.sha256").read_bytes(),
         )
+    acceptance_path = package / "tests" / "acceptance.json"
+    try:
+        acceptance_tests = json.loads(acceptance_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PackageValidationError("Acceptance tests are missing or invalid") from exc
+    if not isinstance(acceptance_tests, list) or not acceptance_tests or len(acceptance_tests) > MAX_ACCEPTANCE_TESTS:
+        raise PackageValidationError("Acceptance tests must be a non-empty list of at most 100 tests")
+    if acceptance_tests != manifest.get("acceptance_tests"):
+        raise PackageValidationError("Acceptance tests do not match the signed release manifest")
     verify_license(package, manifest)
     return manifest
 
@@ -205,9 +214,7 @@ def preflight(package: Path) -> list[str]:
     if manifest.get("deployment", {}).get("accelerator") == "amd" and shutil.which("rocminfo") is None:
         raise PackageValidationError("AMD ROCm tooling is unavailable")
 
-    unreachable = [
-        endpoint for endpoint in manifest.get("external_endpoints", []) if not _endpoint_ready(endpoint)
-    ]
+    unreachable = [endpoint for endpoint in manifest.get("external_endpoints", []) if not _endpoint_ready(endpoint)]
     if unreachable:
         raise PackageValidationError(f"Required endpoints are unreachable: {', '.join(unreachable)}")
     return [
@@ -225,6 +232,104 @@ def _run(command: list[str], cwd: Path) -> None:
         raise PackageValidationError(f"Command failed with exit code {completed.returncode}: {command[0]}")
 
 
+def _contains_expected(actual: Any, expected: Any) -> bool:
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and all(
+            key in actual and _contains_expected(actual[key], value) for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and len(actual) == len(expected)
+            and all(
+                _contains_expected(actual_value, expected_value)
+                for actual_value, expected_value in zip(actual, expected, strict=True)
+            )
+        )
+    return actual == expected
+
+
+def run_acceptance(
+    package: Path,
+    *,
+    base_url: str,
+    api_key: str | None = None,
+    ca: Path | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> list[dict[str, Any]]:
+    manifest = verify_package(package)
+    parsed_base = urlparse(base_url)
+    if (
+        parsed_base.scheme not in {"http", "https"}
+        or not parsed_base.hostname
+        or parsed_base.username
+        or parsed_base.password
+        or parsed_base.query
+        or parsed_base.fragment
+    ):
+        raise PackageValidationError("Runtime URL must be an HTTP(S) URL without credentials, query, or fragment")
+    verify: bool | str = str(ca) if ca else True
+    headers = {"x-api-key": api_key} if api_key else {}
+    results: list[dict[str, Any]] = []
+    with httpx.Client(
+        base_url=base_url.rstrip("/"),
+        headers=headers,
+        verify=verify,
+        transport=transport,
+        timeout=30,
+    ) as client:
+        for test in manifest["acceptance_tests"]:
+            name = test.get("name")
+            request = test.get("request")
+            expected = test.get("expected")
+            required = test.get("required", True)
+            if not isinstance(name, str) or not isinstance(request, dict) or not isinstance(expected, dict):
+                raise PackageValidationError("Acceptance test contract is invalid")
+            path = request.get("path")
+            parsed_path = urlparse(path) if isinstance(path, str) else None
+            if (
+                parsed_path is None
+                or not path.startswith("/")
+                or path.startswith("//")
+                or ".." in Path(parsed_path.path).parts
+                or parsed_path.scheme
+                or parsed_path.netloc
+                or parsed_path.query
+                or parsed_path.fragment
+            ):
+                raise PackageValidationError(f"Acceptance test has an unsafe path: {name}")
+            expected_status = expected.get("status")
+            if not isinstance(expected_status, int) or not MIN_HTTP_STATUS <= expected_status <= MAX_HTTP_STATUS:
+                raise PackageValidationError(f"Acceptance test has an invalid expected status: {name}")
+            method = str(request.get("method") or ("POST" if "body" in request else "GET")).upper()
+            if method not in {"GET", "POST"}:
+                raise PackageValidationError(f"Acceptance test has an unsupported method: {name}")
+            try:
+                response = client.request(method, path, json=request.get("body") if "body" in request else None)
+            except httpx.HTTPError as exc:
+                if required:
+                    raise PackageValidationError(f"Required acceptance test could not connect: {name}") from exc
+                results.append({"name": name, "required": False, "passed": False, "detail": type(exc).__name__})
+                continue
+            passed = response.status_code == expected_status
+            detail = f"status={response.status_code}"
+            if passed and "body" in expected:
+                try:
+                    actual_body = response.json()
+                except ValueError:
+                    passed = False
+                    detail = "response body is not JSON"
+                else:
+                    passed = _contains_expected(actual_body, expected["body"])
+                    if not passed:
+                        detail = "response body did not match"
+            result = {"name": name, "required": bool(required), "passed": passed, "detail": detail}
+            results.append(result)
+            if required and not passed:
+                raise PackageValidationError(f"Required acceptance test failed: {name} ({detail})")
+    return results
+
+
 @app.command()
 def verify(package: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
     manifest = verify_package(package)
@@ -235,6 +340,18 @@ def verify(package: Path = typer.Argument(..., exists=True, file_okay=False)) ->
 def check(package: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
     for item in preflight(package):
         typer.echo(item)
+
+
+@app.command()
+def acceptance(
+    package: Path = typer.Argument(..., exists=True, file_okay=False),
+    url: str = typer.Option(..., "--url"),
+    api_key: str | None = typer.Option(None, envvar="UNNEST_API_KEY", hidden=True),
+    ca: Path | None = typer.Option(None, "--ca", exists=True, dir_okay=False),
+) -> None:
+    for result in run_acceptance(package, base_url=url, api_key=api_key, ca=ca):
+        state = "PASS" if result["passed"] else "WARN"
+        typer.echo(f"{state} {result['name']}: {result['detail']}")
 
 
 @app.command()
