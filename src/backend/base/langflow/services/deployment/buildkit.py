@@ -55,6 +55,9 @@ class WorkerBuildStatus(BaseModel):
         if self.status == "succeeded" and not self.artifacts:
             msg = "Successful worker builds must include artifacts"
             raise ValueError(msg)
+        if self.status == "succeeded" and not self.scan_report:
+            msg = "Successful worker builds must include a security scan report"
+            raise ValueError(msg)
         return self
 
 

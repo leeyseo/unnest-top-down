@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from fastapi import status
-from langflow.services.deployment import WorkerBuildStatus
+from langflow.services.deployment import WorkerArtifact, WorkerBuildStatus
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
@@ -81,7 +81,10 @@ async def _root_versions(client: AsyncClient, headers: dict[str, str]) -> tuple[
     return agent_version_id, ingestion_version_id
 
 
-async def test_create_on_prem_release_from_saved_versions(client: AsyncClient, logged_in_headers, monkeypatch):
+async def test_create_on_prem_release_from_saved_versions(
+    client: AsyncClient, logged_in_headers_super_user, monkeypatch
+):
+    logged_in_headers = logged_in_headers_super_user
     agent_version_id, ingestion_version_id = await _root_versions(client, logged_in_headers)
     payload = _release_payload(agent_version_id, ingestion_version_id)
 
@@ -115,6 +118,7 @@ async def test_create_on_prem_release_from_saved_versions(client: AsyncClient, l
 
     class FakeWorker:
         payload = None
+        sync_count = 0
 
         async def __aenter__(self):
             return self
@@ -125,6 +129,30 @@ async def test_create_on_prem_release_from_saved_versions(client: AsyncClient, l
         async def submit(self, submitted):
             self.payload = submitted
             return WorkerBuildStatus(job_id="worker-job-1", status="queued")
+
+        async def get(self, _job_id):
+            self.sync_count += 1
+            if self.sync_count == 1:
+                return WorkerBuildStatus(
+                    job_id="worker-job-1",
+                    status="blocked",
+                    scan_report={"critical": 1},
+                )
+            return WorkerBuildStatus(
+                job_id="worker-job-1",
+                status="succeeded",
+                scan_report={"critical": 0},
+                artifacts=[
+                    WorkerArtifact(
+                        artifact_type="tar",
+                        location="release.tar",
+                        digest=f"sha256:{'a' * 64}",
+                        checksums={"release.tar": f"sha256:{'a' * 64}"},
+                        sbom={"bomFormat": "CycloneDX"},
+                        signature="cosign-signature",
+                    )
+                ],
+            )
 
     worker = FakeWorker()
     monkeypatch.setattr(
@@ -138,6 +166,42 @@ async def test_create_on_prem_release_from_saved_versions(client: AsyncClient, l
     assert submitted.status_code == status.HTTP_200_OK
     assert submitted.json()["status"] == "queued"
     assert worker.payload["reproducible"] == {"source_date_epoch": 0, "sort_files": True}
+
+    synced = await client.post(
+        f"/api/v1/deployments/on-prem/releases/{body['id']}/builds/{build['id']}/sync",
+        headers=logged_in_headers,
+    )
+    assert synced.status_code == status.HTTP_200_OK
+    assert synced.json()["status"] == "blocked"
+
+    overridden = await client.patch(
+        f"/api/v1/deployments/on-prem/releases/{body['id']}/builds/{build['id']}/critical-override",
+        headers=logged_in_headers,
+        json={"reason": "Accepted for the isolated test environment"},
+    )
+    assert overridden.status_code == status.HTTP_200_OK
+    assert overridden.json()["status"] == "pending"
+
+    submitted = await client.post(
+        f"/api/v1/deployments/on-prem/releases/{body['id']}/builds/{build['id']}/submit",
+        headers=logged_in_headers,
+    )
+    assert submitted.status_code == status.HTTP_200_OK
+    succeeded = await client.post(
+        f"/api/v1/deployments/on-prem/releases/{body['id']}/builds/{build['id']}/sync",
+        headers=logged_in_headers,
+    )
+    assert succeeded.status_code == status.HTTP_200_OK
+    assert succeeded.json()["status"] == "succeeded"
+    assert succeeded.json()["artifacts"][0]["expires_at"] is not None
+
+    audit = await client.get(
+        "/api/v1/authz/audit",
+        headers=logged_in_headers,
+        params={"action": "deployment:critical_override"},
+    )
+    assert audit.status_code == status.HTTP_200_OK
+    assert audit.json()["items"][0]["details"]["reason"] == "Accepted for the isolated test environment"
 
     duplicate = await client.post(
         "/api/v1/deployments/on-prem/releases",

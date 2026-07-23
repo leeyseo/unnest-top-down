@@ -48,3 +48,20 @@ def test_worker_client_rejects_non_tls_url(tmp_path):
 def test_successful_worker_status_requires_artifacts():
     with pytest.raises(ValidationError, match="must include artifacts"):
         WorkerBuildStatus(job_id="job-1", status="succeeded")
+
+
+def test_successful_worker_status_requires_scan_report():
+    with pytest.raises(ValidationError, match="security scan report"):
+        WorkerBuildStatus(
+            job_id="job-1",
+            status="succeeded",
+            artifacts=[
+                {
+                    "artifact_type": "tar",
+                    "location": "artifact.tar",
+                    "digest": f"sha256:{'a' * 64}",
+                    "checksums": {"artifact.tar": f"sha256:{'a' * 64}"},
+                    "sbom": {"bomFormat": "CycloneDX"},
+                }
+            ],
+        )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import httpx
@@ -21,6 +22,7 @@ from langflow.api.v1.schemas.on_prem_deployments import (
     OnPremReleaseRead,
     OnPremReleaseValidationResponse,
 )
+from langflow.services.database.models.auth import AuthzAuditLog
 from langflow.services.database.models.deployment_release import (
     DeploymentAcceptanceTest,
     DeploymentArtifact,
@@ -149,6 +151,9 @@ async def _apply_worker_status(
         await session.delete(artifact)
     if existing:
         await session.flush()
+    pinned = bool(release.config.get("retention", {}).get("pinned"))
+    retention_days = int(release.config.get("retention", {}).get("days", 30))
+    expires_at = None if pinned else datetime.now(timezone.utc) + timedelta(days=retention_days)
     session.add_all(
         [
             DeploymentArtifact(
@@ -160,8 +165,8 @@ async def _apply_worker_status(
                 checksums=artifact.checksums,
                 sbom=artifact.sbom,
                 signature=artifact.signature,
-                pinned=bool(release.config.get("retention", {}).get("pinned")),
-                expires_at=artifact.expires_at,
+                pinned=pinned,
+                expires_at=expires_at,
             )
             for artifact in worker.artifacts
         ]
@@ -444,5 +449,15 @@ async def override_critical_build_block(
     build.overridden_by_user_id = current_user.id
     build.status = "pending"
     session.add(build)
+    session.add(
+        AuthzAuditLog(
+            user_id=current_user.id,
+            action="deployment:critical_override",
+            resource_type="deployment_build",
+            resource_id=build.id,
+            result="allow",
+            details={"reason": payload.reason, "release_id": str(release_id)},
+        )
+    )
     await session.flush()
     return await _build_read(session, build)
