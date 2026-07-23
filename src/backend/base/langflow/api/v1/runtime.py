@@ -10,6 +10,7 @@ import mimetypes
 import os
 import tempfile
 import zipfile
+from collections.abc import AsyncGenerator
 from contextlib import suppress
 from http import HTTPStatus
 from pathlib import Path
@@ -27,8 +28,10 @@ from sqlmodel import col, select
 
 from langflow.api.utils import CurrentActiveUser, DbSession, DbSessionReadOnly, build_content_disposition
 from langflow.api.v1.endpoints import _run_flow_internal, simple_run_flow
-from langflow.api.v1.schemas import RunResponse, SimplifiedAPIRequest
-from langflow.services.auth.utils import get_current_active_superuser, get_current_active_user
+from langflow.api.v1.schemas import ApiKeysResponse, RunResponse, SimplifiedAPIRequest
+from langflow.services.auth.utils import get_current_active_superuser
+from langflow.services.database.models.api_key.crud import create_api_key, delete_api_key, get_api_keys, hash_api_key
+from langflow.services.database.models.api_key.model import ApiKey, ApiKeyCreate, UnmaskedApiKeyRead
 from langflow.services.database.models.deployment_release import DeploymentRelease
 from langflow.services.database.models.flow.model import Flow, FlowRead
 from langflow.services.database.models.flow_version.model import FlowVersion
@@ -51,6 +54,7 @@ from langflow.services.runtime_document import (
     register_document,
     restore_document,
 )
+from langflow.services.runtime_quota import RuntimeQuotaExceededError, get_runtime_quota_service
 from langflow.services.storage.service import StorageService
 
 router = APIRouter(tags=["Runtime"])
@@ -77,6 +81,63 @@ class RuntimeIngestionJobRead(BaseModel):
     status: str
     document_id: UUID | None
     metadata: dict
+
+
+async def _runtime_api_user(
+    request: Request,
+    session: DbSessionReadOnly,
+    current_user: CurrentActiveUser,
+) -> AsyncGenerator[User, None]:
+    raw_key = request.headers.get("x-api-key") or request.query_params.get("x-api-key")
+    if not raw_key:
+        yield current_user
+        return
+
+    api_key = (
+        await session.exec(
+            select(ApiKey).where(
+                ApiKey.api_key_hash == hash_api_key(raw_key),
+                ApiKey.user_id == current_user.id,
+                ApiKey.is_active.is_(True),
+            )
+        )
+    ).first()
+    if api_key is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Runtime API key is unavailable")
+
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > api_key.max_request_bytes:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="API key request size limit exceeded",
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid Content-Length") from exc
+    if len(await request.body()) > api_key.max_request_bytes:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="API key request size limit exceeded",
+        )
+
+    quota = get_runtime_quota_service()
+    try:
+        await quota.acquire(api_key)
+    except RuntimeQuotaExceededError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"API key {exc.limit} limit exceeded",
+        ) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    try:
+        yield current_user
+    finally:
+        await quota.release(api_key)
+
+
+RuntimeApiUser = Annotated[User, Depends(_runtime_api_user)]
 
 
 def _setup_complete() -> bool:
@@ -506,7 +567,7 @@ async def run_agent(
     api_version: str,
     payload: Annotated[dict[str, Any], Body()],
     background_tasks: BackgroundTasks,
-    current_user: CurrentActiveUser,
+    current_user: RuntimeApiUser,
     session: DbSessionReadOnly,
     http_request: Request,
 ):
@@ -526,7 +587,7 @@ async def stream_agent(
     api_version: str,
     payload: Annotated[dict[str, Any], Body()],
     background_tasks: BackgroundTasks,
-    current_user: CurrentActiveUser,
+    current_user: RuntimeApiUser,
     session: DbSessionReadOnly,
     http_request: Request,
 ):
@@ -547,7 +608,7 @@ async def run_webhook(
     name: str,  # noqa: ARG001 - named hooks share the release-pinned Agent
     payload: Annotated[dict[str, Any], Body()],
     background_tasks: BackgroundTasks,
-    current_user: CurrentActiveUser,
+    current_user: RuntimeApiUser,
     session: DbSessionReadOnly,
     http_request: Request,
 ):
@@ -566,7 +627,7 @@ async def run_webhook(
 async def list_sessions(
     api_version: str,
     session: DbSessionReadOnly,
-    current_user: Annotated[User, Depends(get_current_active_user)],
+    current_user: RuntimeApiUser,
 ) -> list[str]:
     _release, flow = await _immutable_agent_flow(session, api_version)
     statement = select(MessageTable.session_id).where(MessageTable.flow_id == flow.id).distinct()
@@ -575,6 +636,36 @@ async def list_sessions(
             MessageTable.session_metadata["user_id"].as_string() == str(current_user.id)  # type: ignore[index]
         )
     return list((await session.exec(statement)).all())
+
+
+@router.get("/api/v1/admin/api-keys")
+async def list_runtime_api_keys(
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> ApiKeysResponse:
+    api_keys = await get_api_keys(session, admin.id)
+    return ApiKeysResponse(total_count=len(api_keys), user_id=admin.id, api_keys=api_keys)
+
+
+@router.post("/api/v1/admin/api-keys", status_code=status.HTTP_201_CREATED)
+async def create_runtime_api_key(
+    payload: ApiKeyCreate,
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> UnmaskedApiKeyRead:
+    return await create_api_key(session, payload, user_id=admin.id)
+
+
+@router.delete("/api/v1/admin/api-keys/{api_key_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_runtime_api_key(
+    api_key_id: UUID,
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> None:
+    try:
+        await delete_api_key(session, api_key_id, admin.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found") from exc
 
 
 @router.get("/api/v1/files")

@@ -77,7 +77,17 @@ async def test_create_api_key_stores_hash(async_session, mock_settings, monkeypa
         lambda key, **_kwargs: f"encrypted-{key}",
     )
 
-    result = await create_api_key(async_session, ApiKeyCreate(name="test"), user.id)
+    result = await create_api_key(
+        async_session,
+        ApiKeyCreate(
+            name="test",
+            rate_limit_per_minute=12,
+            max_concurrent_runs=3,
+            max_request_bytes=4096,
+            daily_quota=50,
+        ),
+        user.id,
+    )
     assert result.api_key.startswith("sk-")
 
     from sqlmodel import select
@@ -86,6 +96,12 @@ async def test_create_api_key_stores_hash(async_session, mock_settings, monkeypa
     assert row is not None
     assert row.api_key_hash == hash_api_key(result.api_key)
     assert row.api_key.startswith("encrypted-sk-")
+    assert (
+        row.rate_limit_per_minute,
+        row.max_concurrent_runs,
+        row.max_request_bytes,
+        row.daily_quota,
+    ) == (12, 3, 4096, 50)
 
 
 @pytest.mark.anyio

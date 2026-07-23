@@ -28,6 +28,7 @@ def test_runtime_profile_mounts_only_deployment_routes(monkeypatch):
     assert "/api/v1/files" in paths
     assert "/api/v1/files/{document_id}/download" in paths
     assert "/api/v1/ingestion/jobs/{job_id}" in paths
+    assert "/api/v1/admin/api-keys" in paths
     assert "/health" in paths
     assert "/ready" in paths
     assert not any(

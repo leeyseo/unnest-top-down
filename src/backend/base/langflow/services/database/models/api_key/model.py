@@ -35,6 +35,10 @@ class ApiKeyBase(SQLModel):
     total_uses: int = Field(default=0)
     is_active: bool = Field(default=True)
     expires_at: datetime | None = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    rate_limit_per_minute: int = Field(default=60, ge=1)
+    max_concurrent_runs: int = Field(default=4, ge=1)
+    max_request_bytes: int = Field(default=10 * 1024 * 1024, ge=1)
+    daily_quota: int = Field(default=10_000, ge=1)
 
     @field_serializer("expires_at", "last_used_at", when_used="always")
     def _serialize_expires_last_used(self, v: datetime | None) -> str | None:

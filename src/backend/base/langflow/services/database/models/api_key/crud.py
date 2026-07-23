@@ -76,6 +76,10 @@ async def create_api_key(session: AsyncSession, api_key_create: ApiKeyCreate, us
         user_id=user_id,
         created_at=api_key_create.created_at or datetime.datetime.now(datetime.timezone.utc),
         expires_at=api_key_create.expires_at,
+        rate_limit_per_minute=api_key_create.rate_limit_per_minute,
+        max_concurrent_runs=api_key_create.max_concurrent_runs,
+        max_request_bytes=api_key_create.max_request_bytes,
+        daily_quota=api_key_create.daily_quota,
     )
 
     session.add(api_key)
