@@ -32,6 +32,7 @@ from .memory_base import MemoryBase, MemoryBaseSession, MemoryBaseWorkflowRun, M
 from .message import MessageTable
 from .runtime_audit import RuntimeAuditCheckpoint, RuntimeAuditEvent
 from .runtime_document import DocumentVersion, IndexGeneration, RuntimeDocument
+from .runtime_schedule import RuntimeSchedule
 from .traces.model import SpanTable, TraceTable
 from .transactions import TransactionTable
 from .user import User
@@ -75,6 +76,7 @@ __all__ = [
     "RuntimeAuditCheckpoint",
     "RuntimeAuditEvent",
     "RuntimeDocument",
+    "RuntimeSchedule",
     "SSOConfig",
     "SSOUserProfile",
     "SpanTable",

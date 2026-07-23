@@ -46,6 +46,7 @@ from langflow.services.database.models.knowledge_base import KnowledgeBaseRecord
 from langflow.services.database.models.message.model import MessageTable
 from langflow.services.database.models.runtime_audit import RuntimeAuditCheckpoint, RuntimeAuditEvent
 from langflow.services.database.models.runtime_document import DocumentVersion, RuntimeDocument
+from langflow.services.database.models.runtime_schedule import RuntimeSchedule
 from langflow.services.database.models.user.model import User
 from langflow.services.deployment import SandboxWorkerClient
 from langflow.services.deps import (
@@ -76,6 +77,7 @@ from langflow.services.runtime_metrics import (
     SETUP_COMPLETE,
 )
 from langflow.services.runtime_quota import RuntimeQuotaExceededError, get_runtime_quota_service
+from langflow.services.runtime_scheduler import next_cron_run
 from langflow.services.storage.service import StorageService
 
 router = APIRouter(tags=["Runtime"])
@@ -115,6 +117,30 @@ class RuntimeAuditEventRead(BaseModel):
     resource_id: str | None
     details: dict[str, Any]
     occurred_at: datetime
+
+
+class RuntimeScheduleCreate(BaseModel):
+    name: str
+    cron_expression: str
+    timezone: str = "UTC"
+    api_version: str = "v1"
+    request_payload: dict[str, Any]
+    enabled: bool = True
+
+
+class RuntimeScheduleRead(BaseModel):
+    id: UUID
+    name: str
+    cron_expression: str
+    timezone: str
+    api_version: str
+    request_payload: dict[str, Any]
+    enabled: bool
+    next_run_at: datetime
+    last_started_at: datetime | None
+    last_finished_at: datetime | None
+    last_status: str | None
+    last_error: str | None
 
 
 async def _record_runtime_audit_event(**kwargs: Any) -> None:
@@ -684,6 +710,7 @@ async def _run_agent(
     current_user: User,
     session: DbSessionReadOnly,
     http_request: Request,
+    trigger: str = "api",
 ):
     started_at = time.monotonic()
     release, flow = await _immutable_agent_flow(session, api_version)
@@ -734,6 +761,7 @@ async def _run_agent(
                 "latency_ms": round((time.monotonic() - started_at) * 1000, 3),
                 "status": "error",
                 "stream": stream,
+                "trigger": trigger,
                 "error_type": type(exc).__name__,
             },
         )
@@ -748,9 +776,42 @@ async def _run_agent(
             "latency_ms": round((time.monotonic() - started_at) * 1000, 3),
             "status": "stream_started" if stream else "success",
             "stream": stream,
+            "trigger": trigger,
         },
     )
     return response
+
+
+async def execute_scheduled_agent(schedule_id: UUID) -> None:
+    async with session_scope() as session:
+        schedule = await session.get(RuntimeSchedule, schedule_id)
+        if schedule is None or not schedule.enabled:
+            return
+        release = await _release_for_api(session, schedule.api_version)
+        user = await session.get(User, release.user_id)
+        if user is None:
+            msg = "Runtime schedule owner is unavailable"
+            raise RuntimeError(msg)
+        background_tasks = BackgroundTasks()
+        await _run_agent(
+            api_version=schedule.api_version,
+            stream=False,
+            background_tasks=background_tasks,
+            payload=copy.deepcopy(schedule.request_payload),
+            current_user=user,
+            session=session,
+            http_request=Request(
+                {
+                    "type": "http",
+                    "method": "POST",
+                    "path": "/internal/runtime-schedule",
+                    "headers": [],
+                    "query_string": b"",
+                }
+            ),
+            trigger="cron",
+        )
+        await background_tasks()
 
 
 @router.get("/ready")
@@ -846,6 +907,7 @@ async def run_webhook(
         current_user=current_user,
         session=session,
         http_request=http_request,
+        trigger="webhook",
     )
 
 
@@ -953,6 +1015,99 @@ async def create_runtime_audit_checkpoint_route(
             detail=str(exc),
         ) from exc
     return RuntimeAuditCheckpoint.model_validate(checkpoint, from_attributes=True).model_dump(mode="json")
+
+
+@router.get("/api/v1/admin/schedules")
+async def list_runtime_schedules(
+    session: DbSessionReadOnly,
+    _admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> list[RuntimeScheduleRead]:
+    schedules = (await session.exec(select(RuntimeSchedule).order_by(col(RuntimeSchedule.name)))).all()
+    return [RuntimeScheduleRead.model_validate(schedule, from_attributes=True) for schedule in schedules]
+
+
+@router.post("/api/v1/admin/schedules", status_code=status.HTTP_201_CREATED)
+async def create_runtime_schedule(
+    payload: RuntimeScheduleCreate,
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> RuntimeScheduleRead:
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Schedule name is required")
+    if (await session.exec(select(RuntimeSchedule).where(RuntimeSchedule.name == name))).first():
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Schedule name already exists")
+    release = await _release_for_api(session, payload.api_version)
+    _contract_input(release, payload.request_payload)
+    try:
+        next_run_at = next_cron_run(payload.cron_expression, payload.timezone)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    schedule = RuntimeSchedule(
+        name=name,
+        cron_expression=payload.cron_expression,
+        timezone=payload.timezone,
+        api_version=payload.api_version,
+        request_payload=copy.deepcopy(payload.request_payload),
+        enabled=payload.enabled,
+        next_run_at=next_run_at,
+        created_by_user_id=admin.id,
+    )
+    session.add(schedule)
+    await session.flush()
+    await append_runtime_audit_event(
+        session,
+        event_type="schedule.created",
+        actor_user_id=admin.id,
+        resource_type="runtime_schedule",
+        resource_id=str(schedule.id),
+        details={"api_version": schedule.api_version, "cron_expression": schedule.cron_expression},
+    )
+    return RuntimeScheduleRead.model_validate(schedule, from_attributes=True)
+
+
+@router.patch("/api/v1/admin/schedules/{schedule_id}")
+async def set_runtime_schedule_enabled(
+    schedule_id: UUID,
+    enabled: Annotated[bool, Body(embed=True)],
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> RuntimeScheduleRead:
+    schedule = await session.get(RuntimeSchedule, schedule_id)
+    if schedule is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    schedule.enabled = enabled
+    schedule.next_run_at = next_cron_run(schedule.cron_expression, schedule.timezone)
+    schedule.updated_at = datetime.now(timezone.utc)
+    session.add(schedule)
+    await append_runtime_audit_event(
+        session,
+        event_type="schedule.enabled" if enabled else "schedule.disabled",
+        actor_user_id=admin.id,
+        resource_type="runtime_schedule",
+        resource_id=str(schedule.id),
+    )
+    return RuntimeScheduleRead.model_validate(schedule, from_attributes=True)
+
+
+@router.delete("/api/v1/admin/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_runtime_schedule(
+    schedule_id: UUID,
+    session: DbSession,
+    admin: Annotated[User, Depends(get_current_active_superuser)],
+) -> None:
+    schedule = await session.get(RuntimeSchedule, schedule_id)
+    if schedule is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    await session.delete(schedule)
+    await append_runtime_audit_event(
+        session,
+        event_type="schedule.deleted",
+        actor_user_id=admin.id,
+        resource_type="runtime_schedule",
+        resource_id=str(schedule.id),
+        details={"name": schedule.name},
+    )
 
 
 @router.get("/api/v1/files")

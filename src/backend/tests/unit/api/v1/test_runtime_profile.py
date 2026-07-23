@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -9,12 +11,14 @@ from langflow.api.v1.runtime import (
     _immutable_agent_flow,
     _immutable_subflows,
     _sandbox_payload,
+    execute_scheduled_agent,
 )
 from langflow.api.v1.schemas import RunResponse, SimplifiedAPIRequest
 from langflow.main import create_runtime_app
 from langflow.services.database.models.deployment_release import DeploymentRelease
 from langflow.services.database.models.flow.model import Flow, FlowRead
 from langflow.services.database.models.flow_version.model import FlowVersion
+from langflow.services.database.models.runtime_schedule import RuntimeSchedule
 from langflow.services.database.models.user.model import User
 from langflow.services.deps import get_settings_service
 from lfx.graph.schema import ResultData, RunOutputs
@@ -38,6 +42,8 @@ def test_runtime_profile_mounts_only_deployment_routes(monkeypatch):
     assert "/api/v1/admin/api-keys" in paths
     assert "/api/v1/admin/audit" in paths
     assert "/api/v1/admin/audit/checkpoints" in paths
+    assert "/api/v1/admin/schedules" in paths
+    assert "/api/v1/admin/schedules/{schedule_id}" in paths
     assert "/health" in paths
     assert "/ready" in paths
     assert "/metrics" in paths
@@ -265,3 +271,48 @@ async def test_risky_release_dispatches_entire_flow_to_sandbox(monkeypatch):
     standard_run.assert_not_awaited()
     audit_event.assert_awaited_once()
     assert audit_event.call_args.kwargs["details"]["status"] == "stream_started"
+
+
+async def test_cron_uses_same_immutable_agent_execution_path(async_session, monkeypatch):
+    monkeypatch.setenv("UNNEST_RUNTIME_SETUP_COMPLETE", "true")
+    user = User(username="schedule-owner", password="unused", is_active=True)  # noqa: S106
+    flow = Flow(name="scheduled-agent", user_id=user.id, data={"nodes": [], "edges": []})
+    version = FlowVersion(
+        flow_id=flow.id,
+        user_id=user.id,
+        data={"nodes": [], "edges": []},
+        version_number=1,
+    )
+    release = DeploymentRelease(
+        user_id=user.id,
+        version="1.0.0",
+        agent_flow_version_id=version.id,
+        ingestion_flow_version_id=version.id,
+        config={},
+        manifest={},
+        api_version="v1",
+    )
+    schedule = RuntimeSchedule(
+        name="nightly",
+        cron_expression="0 0 * * *",
+        api_version="v1",
+        request_payload={"message": "scheduled"},
+        next_run_at=datetime.now(timezone.utc),
+    )
+    async_session.add_all([user, flow, version, release, schedule])
+    schedule_id = schedule.id
+    await async_session.commit()
+    run_agent = AsyncMock(return_value={})
+
+    @asynccontextmanager
+    async def test_session_scope():
+        yield async_session
+
+    monkeypatch.setattr("langflow.api.v1.runtime.session_scope", test_session_scope)
+    monkeypatch.setattr("langflow.api.v1.runtime._run_agent", run_agent)
+
+    await execute_scheduled_agent(schedule_id)
+
+    run_agent.assert_awaited_once()
+    assert run_agent.call_args.kwargs["payload"] == {"message": "scheduled"}
+    assert run_agent.call_args.kwargs["trigger"] == "cron"

@@ -179,6 +179,7 @@ def get_lifespan(*, fix_migration=False, version=None, runtime_only: bool = Fals
         sync_flows_from_fs_task = None
         mcp_init_task = None
         models_dev_refresh_task = None
+        runtime_scheduler = None
         # Bind ``temp_dirs`` before the ``try`` so the shutdown cleanup in the
         # ``finally`` block (which iterates it) never raises ``UnboundLocalError``
         # when startup fails before bundle loading assigns it below. Otherwise an
@@ -435,6 +436,11 @@ def get_lifespan(*, fix_migration=False, version=None, runtime_only: bool = Fals
             queue_service = get_queue_service()
             if not queue_service.is_started():
                 queue_service.start()
+            if runtime_only:
+                from langflow.services.runtime_scheduler import get_runtime_scheduler
+
+                runtime_scheduler = get_runtime_scheduler()
+                runtime_scheduler.start()
 
             total_time = asyncio.get_event_loop().time() - start_time
             await logger.adebug(f"Total initialization time: {total_time:.2f}s")
@@ -604,6 +610,8 @@ def get_lifespan(*, fix_migration=False, version=None, runtime_only: bool = Fals
                     if models_dev_refresh_task and not models_dev_refresh_task.done():
                         models_dev_refresh_task.cancel()
                         tasks_to_cancel.append(models_dev_refresh_task)
+                    if runtime_scheduler is not None:
+                        await runtime_scheduler.stop()
                     if tasks_to_cancel:
                         # Wait for all tasks to complete, capturing exceptions
                         results = await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
