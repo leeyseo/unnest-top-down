@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -187,3 +188,36 @@ class OnPremReleaseValidationResponse(BaseModel):
     manifest: dict[str, Any] | None = None
     errors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class DeploymentArtifactRead(BaseModel):
+    artifact_type: str
+    location: str
+    digest: str
+    size_bytes: int
+    checksums: dict[str, str]
+    sbom: dict[str, Any]
+    signature: str | None
+    expires_at: datetime | None
+
+
+class DeploymentBuildRead(BaseModel):
+    id: UUID
+    release_id: UUID
+    architecture: str
+    status: str
+    worker_job_id: str | None
+    logs: str
+    scan_report: dict[str, Any]
+    critical_override_reason: str | None
+    artifacts: list[DeploymentArtifactRead] = Field(default_factory=list)
+
+
+class DeploymentBuildListResponse(BaseModel):
+    builds: list[DeploymentBuildRead]
+
+
+class CriticalOverrideRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    reason: str = Field(min_length=10, max_length=2000)

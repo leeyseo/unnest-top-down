@@ -56,6 +56,7 @@ class DeploymentBuild(SQLModel, table=True):  # type: ignore[call-arg]
     )
     architecture: str = Field(nullable=False, index=True)
     status: str = Field(default="pending", nullable=False, index=True)
+    worker_job_id: str | None = Field(default=None, nullable=True, index=True)
     logs: str = Field(default="", sa_column=Column(Text, nullable=False))
     scan_report: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JsonVariant, nullable=False))
     critical_override_reason: str | None = Field(default=None, nullable=True)

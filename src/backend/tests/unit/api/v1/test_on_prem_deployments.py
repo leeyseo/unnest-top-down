@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from fastapi import status
+from langflow.services.deployment import WorkerBuildStatus
 
 if TYPE_CHECKING:
     from httpx import AsyncClient
@@ -80,7 +81,7 @@ async def _root_versions(client: AsyncClient, headers: dict[str, str]) -> tuple[
     return agent_version_id, ingestion_version_id
 
 
-async def test_create_on_prem_release_from_saved_versions(client: AsyncClient, logged_in_headers):
+async def test_create_on_prem_release_from_saved_versions(client: AsyncClient, logged_in_headers, monkeypatch):
     agent_version_id, ingestion_version_id = await _root_versions(client, logged_in_headers)
     payload = _release_payload(agent_version_id, ingestion_version_id)
 
@@ -98,6 +99,39 @@ async def test_create_on_prem_release_from_saved_versions(client: AsyncClient, l
     assert [flow["role"] for flow in body["manifest"]["flows"]] == ["agent", "ingestion"]
     assert body["manifest"]["secret_names"] == []
     assert body["manifest"]["build"]["sbom_required"] is True
+    builds = await client.get(
+        f"/api/v1/deployments/on-prem/releases/{body['id']}/builds",
+        headers=logged_in_headers,
+    )
+    assert builds.status_code == status.HTTP_200_OK
+    build = builds.json()["builds"][0]
+    assert build["status"] == "pending"
+
+    class FakeWorker:
+        payload = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def submit(self, submitted):
+            self.payload = submitted
+            return WorkerBuildStatus(job_id="worker-job-1", status="queued")
+
+    worker = FakeWorker()
+    monkeypatch.setattr(
+        "langflow.api.v1.on_prem_deployments._worker_client_or_503",
+        lambda: worker,
+    )
+    submitted = await client.post(
+        f"/api/v1/deployments/on-prem/releases/{body['id']}/builds/{build['id']}/submit",
+        headers=logged_in_headers,
+    )
+    assert submitted.status_code == status.HTTP_200_OK
+    assert submitted.json()["status"] == "queued"
+    assert worker.payload["reproducible"] == {"source_date_epoch": 0, "sort_files": True}
 
     duplicate = await client.post(
         "/api/v1/deployments/on-prem/releases",
