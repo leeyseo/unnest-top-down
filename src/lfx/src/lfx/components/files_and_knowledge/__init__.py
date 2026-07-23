@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from lfx.components._importing import import_mod
 
 if TYPE_CHECKING:
+    from lfx.components.files_and_knowledge.deployment_file_input import DeploymentFileInputComponent
     from lfx.components.files_and_knowledge.directory import DirectoryComponent
     from lfx.components.files_and_knowledge.file import FileComponent
     from lfx.components.files_and_knowledge.filesystem import FileSystemToolComponent
@@ -17,6 +18,7 @@ if TYPE_CHECKING:
 
 _dynamic_imports = {
     "DirectoryComponent": "directory",
+    "DeploymentFileInputComponent": "deployment_file_input",
     "FileComponent": "file",
     "FileSystemToolComponent": "filesystem",
     "KnowledgeComponent": "knowledge",
@@ -27,6 +29,7 @@ _dynamic_imports = {
 }
 
 __all__ = [
+    "DeploymentFileInputComponent",
     "DirectoryComponent",
     "FileComponent",
     "FileSystemToolComponent",

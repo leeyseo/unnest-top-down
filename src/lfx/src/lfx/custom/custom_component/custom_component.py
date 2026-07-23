@@ -61,6 +61,8 @@ class CustomComponent(BaseComponent):
     # True constants that should be shared (using ClassVar)
     _code_class_base_inheritance: ClassVar[str] = "CustomComponent"
     function_entrypoint_name: ClassVar[str] = "build"
+    deployment_metadata: ClassVar[dict[str, Any]] = {}
+    """Optional offline deployment metadata copied into saved component metadata."""
     name: str | None = None
     """The name of the component used to styles. Defaults to None."""
     display_name: str | None = None

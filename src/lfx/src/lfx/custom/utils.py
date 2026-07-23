@@ -514,6 +514,9 @@ def build_component_metadata(
         module_name = get_module_name_from_display_name(frontend_node.display_name)
         frontend_node.metadata["module"] = f"custom_components.{module_name}"
 
+    if deployment_metadata := getattr(custom_component, "deployment_metadata", None):
+        frontend_node.metadata["deployment"] = deployment_metadata
+
     # Generate code hash for cache invalidation and debugging
     try:
         code_hash = _generate_code_hash(custom_component._code, module_name)
