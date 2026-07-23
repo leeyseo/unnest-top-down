@@ -23,7 +23,10 @@ import { Textarea } from "@/components/ui/textarea";
 import { useGetFlowVersions } from "@/controllers/API/queries/flow-version/use-get-flow-versions";
 import { useGetRefreshFlowsQuery } from "@/controllers/API/queries/flows/use-get-refresh-flows-query";
 import {
+  getOnPremArtifactDownloadUrl,
   useExportOnPremRelease,
+  usePushOnPremRegistry,
+  useSyncOnPremBuild,
   useValidateOnPremRelease,
 } from "@/controllers/API/queries/on-prem-deployments/use-on-prem-release";
 import { useFolderStore } from "@/stores/foldersStore";
@@ -148,6 +151,8 @@ export default function OnPremExportModal({
     defaultOnPremWizardValues,
   );
   const [jsonError, setJsonError] = useState("");
+  const [registryReference, setRegistryReference] = useState("");
+  const [registrySecretName, setRegistrySecretName] = useState("");
   const showError = useErrorAlert();
 
   const flowsQuery = useGetRefreshFlowsQuery(
@@ -177,6 +182,8 @@ export default function OnPremExportModal({
 
   const validation = useValidateOnPremRelease();
   const exportRelease = useExportOnPremRelease();
+  const syncBuild = useSyncOnPremBuild();
+  const pushRegistry = usePushOnPremRegistry();
   const flowChoices = useMemo(() => flowOptions(flows), [flows]);
 
   const update = <K extends keyof OnPremWizardValues>(
@@ -218,14 +225,44 @@ export default function OnPremExportModal({
     }
   };
 
+  const refreshBuild = async () => {
+    if (!exportRelease.data) return;
+    try {
+      await syncBuild.mutateAsync({
+        releaseId: exportRelease.data.release.id,
+        buildId: exportRelease.data.build.id,
+      });
+    } catch (error) {
+      showError("Could not refresh on-prem build", error);
+    }
+  };
+
+  const pushToRegistry = async () => {
+    if (!exportRelease.data) return;
+    try {
+      await pushRegistry.mutateAsync({
+        releaseId: exportRelease.data.release.id,
+        buildId: exportRelease.data.build.id,
+        reference: registryReference.trim(),
+        credentialSecretName: registrySecretName.trim(),
+      });
+    } catch (error) {
+      showError("Could not push build to registry", error);
+    }
+  };
+
   const resetAndClose = () => {
     setStep(0);
     setValues(defaultOnPremWizardValues);
     setAgentFlowId("");
     setIngestionFlowId("");
     setJsonError("");
+    setRegistryReference("");
+    setRegistrySecretName("");
     validation.reset();
     exportRelease.reset();
+    syncBuild.reset();
+    pushRegistry.reset();
     setOpen(false);
   };
 
@@ -237,6 +274,10 @@ export default function OnPremExportModal({
       values.agentFlowVersionId !== values.ingestionFlowVersionId);
   const validated =
     validation.data != null && validation.data.errors.length === 0;
+  const currentBuild = syncBuild.data ?? exportRelease.data?.build;
+  const downloadableArtifact = currentBuild?.artifacts?.find((artifact) =>
+    ["tar", "package"].includes(artifact.artifact_type),
+  );
 
   return (
     <Dialog open={open} onOpenChange={(value) => !value && resetAndClose()}>
@@ -661,9 +702,69 @@ export default function OnPremExportModal({
                 </p>
               )}
               {exportRelease.data && (
-                <div className="rounded-md border border-primary p-4 text-sm">
-                  Release {exportRelease.data.release.release_version} was
-                  created. Build status: {exportRelease.data.build.status}.
+                <div className="space-y-4 rounded-md border border-primary p-4 text-sm">
+                  <p>
+                    Release {exportRelease.data.release.release_version} was
+                    created. Build status: {currentBuild?.status}.
+                  </p>
+                  {currentBuild?.status !== "succeeded" && (
+                    <Button
+                      variant="outline"
+                      onClick={refreshBuild}
+                      disabled={syncBuild.isPending}
+                    >
+                      {syncBuild.isPending ? "Refreshing…" : "Refresh build"}
+                    </Button>
+                  )}
+                  {currentBuild?.status === "succeeded" &&
+                    downloadableArtifact && (
+                      <a
+                        className="inline-flex h-8 items-center rounded-md border border-input px-4 text-sm hover:bg-muted"
+                        href={getOnPremArtifactDownloadUrl(
+                          exportRelease.data.release.id,
+                          currentBuild.id,
+                          downloadableArtifact.id,
+                        )}
+                      >
+                        Download verified tar
+                      </a>
+                    )}
+                  {currentBuild?.status === "succeeded" && (
+                    <div className="grid grid-cols-2 gap-3 border-t pt-4">
+                      <Field
+                        id="on-prem-registry-reference"
+                        label="Registry image reference"
+                        value={registryReference}
+                        onChange={setRegistryReference}
+                      />
+                      <Field
+                        id="on-prem-registry-secret"
+                        label="Credential secret name"
+                        value={registrySecretName}
+                        onChange={setRegistrySecretName}
+                      />
+                      <Button
+                        className="col-span-2"
+                        variant="outline"
+                        onClick={pushToRegistry}
+                        disabled={
+                          !registryReference.trim() ||
+                          !registrySecretName.trim() ||
+                          pushRegistry.isPending
+                        }
+                      >
+                        {pushRegistry.isPending
+                          ? "Pushing…"
+                          : "Push to private registry"}
+                      </Button>
+                      {pushRegistry.data && (
+                        <p className="col-span-2 break-all text-muted-foreground">
+                          Pushed {pushRegistry.data.location}@
+                          {pushRegistry.data.digest}
+                        </p>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

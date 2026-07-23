@@ -3,8 +3,11 @@ import { api } from "../../api";
 import { getURL } from "../../helpers/constants";
 import { UseRequestProcessor } from "../../services/request-processor";
 import type {
+  OnPremArtifact,
   OnPremBuild,
+  OnPremBuildTarget,
   OnPremExportResult,
+  OnPremRegistryPush,
   OnPremRelease,
   OnPremReleasePayload,
   OnPremReleaseValidation,
@@ -67,3 +70,56 @@ export const useExportOnPremRelease: useMutationFunctionType<
     },
   );
 };
+
+export const useSyncOnPremBuild: useMutationFunctionType<
+  undefined,
+  OnPremBuildTarget,
+  OnPremBuild
+> = (options?) => {
+  const { mutate } = UseRequestProcessor();
+  return mutate(
+    ["useSyncOnPremBuild"],
+    async ({ releaseId, buildId }: OnPremBuildTarget) =>
+      (
+        await api.post<OnPremBuild>(
+          `${releasesUrl}/${releaseId}/builds/${buildId}/sync`,
+        )
+      ).data,
+    { ...options, retry: 0 },
+  );
+};
+
+export const usePushOnPremRegistry: useMutationFunctionType<
+  undefined,
+  OnPremRegistryPush,
+  OnPremArtifact
+> = (options?) => {
+  const { mutate } = UseRequestProcessor();
+  return mutate(
+    ["usePushOnPremRegistry"],
+    async ({
+      releaseId,
+      buildId,
+      reference,
+      credentialSecretName,
+    }: OnPremRegistryPush) =>
+      (
+        await api.post<OnPremArtifact>(
+          `${releasesUrl}/${releaseId}/builds/${buildId}/registry`,
+          {
+            reference,
+            credential_secret_name: credentialSecretName,
+          },
+        )
+      ).data,
+    { ...options, retry: 0 },
+  );
+};
+
+export function getOnPremArtifactDownloadUrl(
+  releaseId: string,
+  buildId: string,
+  artifactId: string,
+) {
+  return `${releasesUrl}/${releaseId}/builds/${buildId}/artifacts/${artifactId}/download`;
+}

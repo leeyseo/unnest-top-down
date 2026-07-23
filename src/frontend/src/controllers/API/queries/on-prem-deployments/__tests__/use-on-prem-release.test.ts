@@ -13,21 +13,25 @@ jest.mock("@/controllers/API/helpers/constants", () => ({
 jest.mock("@/controllers/API/services/request-processor", () => ({
   UseRequestProcessor: jest.fn(() => ({
     // biome-ignore lint/suspicious/noExplicitAny: test mutation adapter
-    mutate: jest.fn((_key: unknown, fn: any, options: any) => ({
+    mutate: jest.fn((_key: unknown, fn: any, options: any) => {
       // biome-ignore lint/suspicious/noExplicitAny: test mutation adapter
-      mutate: async (payload: any) => {
+      const mutateAsync = async (payload: any) => {
         const result = await fn(payload);
         await options?.onSuccess?.(result);
         return result;
-      },
-    })),
+      };
+      return { mutate: mutateAsync, mutateAsync };
+    }),
     queryClient: { invalidateQueries: mockInvalidateQueries },
   })),
 }));
 
 import type { OnPremReleasePayload } from "../types";
 import {
+  getOnPremArtifactDownloadUrl,
   useExportOnPremRelease,
+  usePushOnPremRegistry,
+  useSyncOnPremBuild,
   useValidateOnPremRelease,
 } from "../use-on-prem-release";
 
@@ -89,7 +93,7 @@ describe("on-prem release API", () => {
     });
 
     const mutation = useExportOnPremRelease();
-    const result = await mutation.mutate(payload);
+    const result = await mutation.mutateAsync(payload);
 
     expect(mockApiGet).toHaveBeenCalledWith(
       "/api/v1/deployments/on-prem/releases/release-1/builds",
@@ -101,5 +105,44 @@ describe("on-prem release API", () => {
     expect(mockInvalidateQueries).toHaveBeenCalledWith({
       queryKey: ["useGetOnPremReleases"],
     });
+  });
+
+  it("syncs builds and pushes using a secret reference only", async () => {
+    mockApiPost
+      .mockResolvedValueOnce({ data: { id: "build-1", status: "succeeded" } })
+      .mockResolvedValueOnce({
+        data: {
+          id: "artifact-1",
+          location: "registry.internal/agency/unnest:1.0.0",
+        },
+      });
+
+    const sync = useSyncOnPremBuild();
+    await sync.mutate({ releaseId: "release-1", buildId: "build-1" });
+    const push = usePushOnPremRegistry();
+    await push.mutate({
+      releaseId: "release-1",
+      buildId: "build-1",
+      reference: "registry.internal/agency/unnest:1.0.0",
+      credentialSecretName: "REGISTRY_CREDENTIAL",
+    });
+
+    expect(mockApiPost).toHaveBeenNthCalledWith(
+      1,
+      "/api/v1/deployments/on-prem/releases/release-1/builds/build-1/sync",
+    );
+    expect(mockApiPost).toHaveBeenNthCalledWith(
+      2,
+      "/api/v1/deployments/on-prem/releases/release-1/builds/build-1/registry",
+      {
+        reference: "registry.internal/agency/unnest:1.0.0",
+        credential_secret_name: "REGISTRY_CREDENTIAL",
+      },
+    );
+    expect(
+      getOnPremArtifactDownloadUrl("release-1", "build-1", "artifact-1"),
+    ).toBe(
+      "/api/v1/deployments/on-prem/releases/release-1/builds/build-1/artifacts/artifact-1/download",
+    );
   });
 });
