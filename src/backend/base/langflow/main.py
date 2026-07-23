@@ -159,7 +159,7 @@ def warn_about_future_cors_changes(settings):
         )
 
 
-def get_lifespan(*, fix_migration=False, version=None):
+def get_lifespan(*, fix_migration=False, version=None, runtime_only: bool = False):
     initialize_settings_service()
 
     @asynccontextmanager
@@ -289,7 +289,9 @@ def get_lifespan(*, fix_migration=False, version=None):
             telemetry_service = get_telemetry_service()
 
             # Gate: Load bundles
-            if is_step_complete(PreloadStep.BUNDLES):
+            if runtime_only:
+                await logger.adebug("Skipping bundle downloads in on-premise runtime")
+            elif is_step_complete(PreloadStep.BUNDLES):
                 # Inherit bundle paths from master via COW.
                 # get_owned_temp_dirs() returns the preloaded dirs if this is
                 # the master, or an empty list if this is a worker (workers
@@ -331,7 +333,9 @@ def get_lifespan(*, fix_migration=False, version=None):
                 await logger.adebug(f"Types cached in {asyncio.get_event_loop().time() - current_time:.2f}s")
 
             # Gate: Create/update starter projects
-            if is_step_complete(PreloadStep.STARTER_PROJECTS):
+            if runtime_only:
+                await logger.adebug("Skipping starter projects in on-premise runtime")
+            elif is_step_complete(PreloadStep.STARTER_PROJECTS):
                 await logger.adebug("Skipping starter projects: inherited from master")
             else:
                 # Use file-based lock to prevent multiple workers from creating duplicate starter projects
@@ -363,7 +367,7 @@ def get_lifespan(*, fix_migration=False, version=None):
                         )
 
             # Gate: Initialize agentic global variables (when agentic_experience enabled)
-            if get_settings_service().settings.agentic_experience:
+            if get_settings_service().settings.agentic_experience and not runtime_only:
                 if is_step_complete(PreloadStep.AGENTIC_GLOBALS):
                     await logger.adebug("Skipping agentic global variables: master already completed it during preload")
                 else:
@@ -381,19 +385,21 @@ def get_lifespan(*, fix_migration=False, version=None):
 
             current_time = asyncio.get_event_loop().time()
             await logger.adebug("Starting telemetry service")
-            telemetry_service.start()
+            if not runtime_only:
+                telemetry_service.start()
             await logger.adebug(f"started telemetry service in {asyncio.get_event_loop().time() - current_time:.2f}s")
 
-            current_time = asyncio.get_event_loop().time()
-            await logger.adebug("Starting MCP Composer service")
-            mcp_composer_service = cast("MCPComposerService", get_service(ServiceType.MCP_COMPOSER_SERVICE))
-            await mcp_composer_service.start()
-            await logger.adebug(
-                f"started MCP Composer service in {asyncio.get_event_loop().time() - current_time:.2f}s"
-            )
+            if not runtime_only:
+                current_time = asyncio.get_event_loop().time()
+                await logger.adebug("Starting MCP Composer service")
+                mcp_composer_service = cast("MCPComposerService", get_service(ServiceType.MCP_COMPOSER_SERVICE))
+                await mcp_composer_service.start()
+                await logger.adebug(
+                    f"started MCP Composer service in {asyncio.get_event_loop().time() - current_time:.2f}s"
+                )
 
             # Gate: Auto-configure agentic MCP server (when agentic_experience enabled)
-            if get_settings_service().settings.agentic_experience:
+            if get_settings_service().settings.agentic_experience and not runtime_only:
                 if is_step_complete(PreloadStep.AGENTIC_MCP):
                     await logger.adebug(
                         "Skipping agentic MCP server config: master already completed it during preload"
@@ -413,7 +419,9 @@ def get_lifespan(*, fix_migration=False, version=None):
 
             # Gate: Load flows from directory
             current_time = asyncio.get_event_loop().time()
-            if is_step_complete(PreloadStep.FLOWS):
+            if runtime_only:
+                await logger.adebug("Skipping editable flow imports in on-premise runtime")
+            elif is_step_complete(PreloadStep.FLOWS):
                 await logger.adebug("Skipping flows load: master already completed it during preload")
             else:
                 await logger.adebug("Loading flows")
@@ -422,7 +430,8 @@ def get_lifespan(*, fix_migration=False, version=None):
 
             # Per-worker setup: sync_flows_from_fs and queue service
             # (MUST be started per-worker: they create asyncio tasks bound to this event loop)
-            sync_flows_from_fs_task = asyncio.create_task(sync_flows_from_fs())
+            if not runtime_only:
+                sync_flows_from_fs_task = asyncio.create_task(sync_flows_from_fs())
             queue_service = get_queue_service()
             if not queue_service.is_started():
                 queue_service.start()
@@ -452,7 +461,7 @@ def get_lifespan(*, fix_migration=False, version=None):
 
             # Start the delayed initialization as a background task
             # Allows the server to start first to avoid race conditions with MCP Server startup
-            if get_settings_service().settings.skip_mcp_auto_init:
+            if runtime_only or get_settings_service().settings.skip_mcp_auto_init:
                 await logger.adebug("Skipping MCP server auto-initialization (skip_mcp_auto_init=True)")
             else:
                 mcp_init_task = asyncio.create_task(delayed_init_mcp_servers())
@@ -507,17 +516,22 @@ def get_lifespan(*, fix_migration=False, version=None):
             # fetch. Tests set this: the startup fetch otherwise fires from a
             # background task during whatever test is running, hitting the
             # network and tripping event-loop-block detectors (pyleak).
-            if os.getenv("LANGFLOW_MODELS_DEV_REFRESH", "true").lower() not in ("false", "0", "no"):
+            if not runtime_only and os.getenv("LANGFLOW_MODELS_DEV_REFRESH", "true").lower() not in (
+                "false",
+                "0",
+                "no",
+            ):
                 models_dev_refresh_task = asyncio.create_task(refresh_models_dev_periodically())
             else:
                 await logger.adebug("models.dev refresh disabled via LANGFLOW_MODELS_DEV_REFRESH")
 
             # v1 and project MCP server context managers
-            from langflow.api.v1.mcp import start_streamable_http_manager
-            from langflow.api.v1.mcp_projects import start_project_task_group
+            if not runtime_only:
+                from langflow.api.v1.mcp import start_streamable_http_manager
+                from langflow.api.v1.mcp_projects import start_project_task_group
 
-            await start_streamable_http_manager()
-            await start_project_task_group()
+                await start_streamable_http_manager()
+                await start_project_task_group()
 
             yield
         except asyncio.CancelledError:
@@ -565,19 +579,20 @@ def get_lifespan(*, fix_migration=False, version=None):
 
                 # Step 1: Cancelling Background Tasks
                 with shutdown_progress.step(1):
-                    from langflow.api.v1.mcp import stop_streamable_http_manager
-                    from langflow.api.v1.mcp_projects import stop_project_task_group
+                    if not runtime_only:
+                        from langflow.api.v1.mcp import stop_streamable_http_manager
+                        from langflow.api.v1.mcp_projects import stop_project_task_group
 
-                    # Shutdown MCP project servers
-                    try:
-                        await stop_project_task_group()
-                    except Exception as e:  # noqa: BLE001
-                        await logger.aerror(f"Failed to stop MCP Project servers: {e}")
-                    # Close MCP server streamable-http session manager .run() context manager
-                    try:
-                        await stop_streamable_http_manager()
-                    except Exception as e:  # noqa: BLE001
-                        await logger.aerror(f"Failed to stop MCP server streamable-http session manager: {e}")
+                        # Shutdown MCP project servers
+                        try:
+                            await stop_project_task_group()
+                        except Exception as e:  # noqa: BLE001
+                            await logger.aerror(f"Failed to stop MCP Project servers: {e}")
+                        # Close MCP server streamable-http session manager .run() context manager
+                        try:
+                            await stop_streamable_http_manager()
+                        except Exception as e:  # noqa: BLE001
+                            await logger.aerror(f"Failed to stop MCP server streamable-http session manager: {e}")
                     # Cancel background tasks
                     tasks_to_cancel = []
                     if sync_flows_from_fs_task:
@@ -642,18 +657,22 @@ def get_lifespan(*, fix_migration=False, version=None):
     return lifespan
 
 
-def create_app():
+def create_app(*, runtime_only: bool = False):
     """Create the FastAPI app and include the router."""
     from langflow.utils.version import get_version_info
 
     __version__ = get_version_info()["version"]
     configure()
-    lifespan = get_lifespan(version=__version__)
+    lifespan = get_lifespan(version=__version__, runtime_only=runtime_only)
 
     settings = get_settings_service().settings
+    if runtime_only:
+        settings.do_not_track = True
+        settings.deactivate_tracing = True
+        settings.sentry_dsn = None
 
     app = FastAPI(
-        title="Langflow",
+        title="Unnest Runtime" if runtime_only else "Langflow",
         version=__version__,
         lifespan=lifespan,
         root_path=settings.root_path,
@@ -662,7 +681,8 @@ def create_app():
         ContentSizeLimitMiddleware,
     )
 
-    add_sentry_middleware(app)
+    if not runtime_only:
+        add_sentry_middleware(app)
 
     # Warn about future CORS changes
     warn_about_future_cors_changes(settings)
@@ -805,17 +825,24 @@ def create_app():
             msg = f"Invalid port number {prome_port_str}"
             raise ValueError(msg)
 
-    if settings.mcp_server_enabled:
+    if settings.mcp_server_enabled and not runtime_only:
         from langflow.api.v1 import mcp_router
 
         router.include_router(mcp_router)
 
-    app.include_router(router)
+    if runtime_only:
+        from langflow.api.runtime_router import router as runtime_router
+
+        app.include_router(runtime_router)
+    else:
+        app.include_router(router)
     app.include_router(health_check_router)
-    app.include_router(log_router)
+    if not runtime_only:
+        app.include_router(log_router)
 
     # Discover and register additional routers from plugins (langflow.plugins entry-point)
-    load_plugin_routes(app)
+    if not runtime_only:
+        load_plugin_routes(app)
 
     @app.exception_handler(DeploymentGuardError)
     async def deployment_guard_exception_handler(_request: Request, exc: DeploymentGuardError):
@@ -874,8 +901,9 @@ def create_app():
     # FastAPI >=0.137 lazy include_router puts `_IncludedRouter` wrappers (no `.path`)
     # in `app.routes`, which crashes OTel's span route extraction on partial matches
     # (e.g. CORS preflight). Patch the helper before instrumenting.
-    patch_otel_fastapi_route_details()
-    FastAPIInstrumentor.instrument_app(app)
+    if not runtime_only:
+        patch_otel_fastapi_route_details()
+        FastAPIInstrumentor.instrument_app(app)
 
     add_pagination(app)
 
@@ -886,6 +914,11 @@ def create_app():
     app.state.limiter = limiter
 
     return app
+
+
+def create_runtime_app() -> FastAPI:
+    """Create the API-only app used by exported on-premise releases."""
+    return create_app(runtime_only=True)
 
 
 def add_sentry_middleware(app: FastAPI) -> None:
