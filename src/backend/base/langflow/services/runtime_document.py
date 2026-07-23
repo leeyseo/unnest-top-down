@@ -3,20 +3,28 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from lfx.base.knowledge_bases.backends import create_backend
 from sqlmodel import col, func, select, update
 
+from langflow.api.utils.kb_helpers import KBStorageHelper
+from langflow.services.database.models.knowledge_base import KnowledgeBaseRecord
 from langflow.services.database.models.runtime_document import (
     DocumentVersion,
     IndexGeneration,
     RuntimeDocument,
 )
+from langflow.services.database.models.user.model import User
+from langflow.services.runtime_audit import append_runtime_audit_event
 
 if TYPE_CHECKING:
     from uuid import UUID
 
     from sqlmodel.ext.asyncio.session import AsyncSession
+
+    from langflow.services.storage.service import StorageService
 
 DuplicateStrategy = Literal["skip", "new_version", "replace"]
 SHA256_DIGEST_LENGTH = 71
@@ -190,6 +198,84 @@ async def restore_document(session: AsyncSession, *, document: RuntimeDocument) 
     document.updated_at = datetime.now(timezone.utc)
     session.add(document)
     await session.flush()
+
+
+async def purge_expired_runtime_documents(
+    session: AsyncSession,
+    *,
+    storage_service: StorageService,
+    now: datetime | None = None,
+) -> int:
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    documents = (
+        await session.exec(
+            select(RuntimeDocument).where(
+                RuntimeDocument.status == "trash",
+                col(RuntimeDocument.purge_after).is_not(None),
+                col(RuntimeDocument.purge_after) <= current,
+            )
+        )
+    ).all()
+    purged = 0
+    for document in documents:
+        knowledge_base = await session.get(KnowledgeBaseRecord, document.knowledge_base_id)
+        user = await session.get(User, document.user_id)
+        if knowledge_base is None or user is None:
+            msg = "Runtime document owner or Knowledge Base is unavailable"
+            raise RuntimeError(msg)
+        generations = (
+            await session.exec(select(IndexGeneration).where(IndexGeneration.knowledge_base_id == knowledge_base.id))
+        ).all()
+        aliases = {
+            alias
+            for generation in generations
+            if isinstance(generation.backend_reference, dict)
+            and isinstance((alias := generation.backend_reference.get("alias")), str)
+            and alias
+        }
+        user_root = (KBStorageHelper.get_root_path() / user.username).resolve()
+        for alias in sorted(aliases):
+            if Path(alias).name != alias or alias in {".", ".."}:
+                msg = "Runtime index alias is invalid"
+                raise RuntimeError(msg)
+            backend_path = (user_root / alias).resolve()
+            if user_root not in backend_path.parents:
+                msg = "Runtime index alias escapes its Knowledge Base root"
+                raise RuntimeError(msg)
+            backend = create_backend(
+                knowledge_base.backend_type,
+                kb_name=alias,
+                kb_path=backend_path,
+                backend_config=knowledge_base.backend_config,
+                user_id=document.user_id,
+            )
+            try:
+                await backend.delete_by({"runtime_document_id": str(document.id)})
+            finally:
+                await backend.teardown()
+
+        versions = (await session.exec(select(DocumentVersion).where(DocumentVersion.document_id == document.id))).all()
+        for storage_path in sorted({version.storage_path for version in versions}):
+            namespace, separator, storage_name = storage_path.partition("/")
+            if not separator or not namespace or not storage_name:
+                msg = "Runtime document storage path is invalid"
+                raise RuntimeError(msg)
+            await storage_service.delete_file(namespace, storage_name)
+        await append_runtime_audit_event(
+            session,
+            event_type="file.purged",
+            resource_type="runtime_document",
+            resource_id=str(document.id),
+            details={"versions": len(versions), "index_generations": len(aliases)},
+        )
+        for version in versions:
+            await session.delete(version)
+        await session.delete(document)
+        purged += 1
+    await session.flush()
+    return purged
 
 
 async def create_shadow_generation(

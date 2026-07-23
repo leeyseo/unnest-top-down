@@ -13,8 +13,9 @@ from sqlalchemy import text
 from sqlmodel import col, select
 
 from langflow.services.database.models.runtime_schedule import RuntimeSchedule
-from langflow.services.deps import session_scope
+from langflow.services.deps import get_storage_service, session_scope
 from langflow.services.runtime_conversation import purge_expired_runtime_conversations
+from langflow.services.runtime_document import purge_expired_runtime_documents
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -130,9 +131,15 @@ async def _execute_schedule(schedule_id: UUID) -> None:
     await execute_scheduled_agent(schedule_id)
 
 
-async def _purge_conversations(now: datetime) -> int:
+async def _run_maintenance(now: datetime) -> int:
     async with session_scope() as session:
-        return await purge_expired_runtime_conversations(session, now=now)
+        conversations = await purge_expired_runtime_conversations(session, now=now)
+        documents = await purge_expired_runtime_documents(
+            session,
+            storage_service=get_storage_service(),
+            now=now,
+        )
+        return conversations + documents
 
 
 class RuntimeScheduler:
@@ -140,7 +147,7 @@ class RuntimeScheduler:
         self,
         *,
         executor: Callable[[UUID], Awaitable[None]] = _execute_schedule,
-        maintenance: Callable[[datetime], Awaitable[int]] = _purge_conversations,
+        maintenance: Callable[[datetime], Awaitable[int]] = _run_maintenance,
         poll_seconds: float = 15.0,
     ) -> None:
         self.executor = executor
