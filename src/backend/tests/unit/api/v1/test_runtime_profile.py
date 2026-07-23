@@ -20,7 +20,11 @@ from langflow.services.database.models.deployment_release import DeploymentRelea
 from langflow.services.database.models.flow.model import Flow, FlowRead
 from langflow.services.database.models.flow_version.model import FlowVersion
 from langflow.services.database.models.knowledge_base import KnowledgeBaseRecord
-from langflow.services.database.models.runtime_document import IndexGeneration
+from langflow.services.database.models.runtime_document import (
+    DocumentVersion,
+    IndexGeneration,
+    RuntimeDocument,
+)
 from langflow.services.database.models.runtime_schedule import RuntimeSchedule
 from langflow.services.database.models.user.model import User
 from langflow.services.deps import get_settings_service
@@ -168,7 +172,22 @@ async def test_runtime_retrieval_uses_active_physical_index(async_session):
         is_active=True,
         backend_reference={"alias": "shared--physical"},
     )
-    async_session.add_all([user, kb, flow, generation])
+    document = RuntimeDocument(
+        user_id=user.id,
+        knowledge_base_id=kb.id,
+        name="policy.txt",
+        status="active",
+    )
+    version = DocumentVersion(
+        document_id=document.id,
+        version_number=1,
+        checksum=f"sha256:{'e' * 64}",
+        mime_type="text/plain",
+        size_bytes=6,
+        storage_path="runtime-documents/policy.txt",
+        status="active",
+    )
+    async_session.add_all([user, kb, flow, generation, document, version])
     await async_session.flush()
     request = SimplifiedAPIRequest(output_type="any", tweaks={})
 
@@ -180,7 +199,10 @@ async def test_runtime_retrieval_uses_active_physical_index(async_session):
     )
 
     assert request.tweaks is not None
-    assert request.tweaks.root["knowledge"] == {"knowledge_base": "shared--physical"}
+    assert request.tweaks.root["knowledge"] == {
+        "knowledge_base": "shared--physical",
+        "metadata_filter": f'{{"runtime_document_version_id": ["{version.id}"]}}',
+    }
 
 
 def test_runtime_applies_release_api_contract():

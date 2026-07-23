@@ -540,6 +540,24 @@ def _knowledge_component_ids(data: dict[str, Any]) -> list[str]:
     return matches
 
 
+def _component_metadata(data: dict[str, Any], component_id: str) -> dict[str, Any]:
+    node = next(
+        (
+            item
+            for item in data.get("nodes", [])
+            if isinstance(item, dict) and item.get("id") == component_id
+        ),
+        {},
+    )
+    field = node.get("data", {}).get("node", {}).get("template", {}).get("metadata_json", {})
+    value = field.get("value") if isinstance(field, dict) else None
+    try:
+        decoded = json.loads(value) if isinstance(value, str) and value else value
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
 def _release_index_fingerprint(release: DeploymentRelease) -> str:
     flows = release.manifest.get("flows", [])
     ingestion = next(
@@ -584,7 +602,19 @@ async def _run_ingestion_target(
             }
         }
         for component_id in _knowledge_component_ids(ingestion_data):
-            tweaks.setdefault(component_id, {})["knowledge_base"] = physical_alias
+            metadata = _component_metadata(ingestion_data, component_id)
+            metadata.update(
+                {
+                    "runtime_document_id": str(document.id),
+                    "runtime_document_version_id": str(version.id),
+                }
+            )
+            tweaks.setdefault(component_id, {}).update(
+                {
+                    "knowledge_base": physical_alias,
+                    "metadata_json": json.dumps(metadata, sort_keys=True),
+                }
+            )
         await simple_run_flow(
             flow=immutable,
             input_request=SimplifiedAPIRequest(output_type="any", tweaks=tweaks),
@@ -833,11 +863,33 @@ async def _apply_active_index_tweaks(
     physical_alias = generation.backend_reference.get("alias") if generation else None
     if not isinstance(physical_alias, str) or not physical_alias:
         return
+    active_version_ids = [
+        str(value)
+        for value in (
+            await session.exec(
+                select(DocumentVersion.id)
+                .join(RuntimeDocument, RuntimeDocument.id == DocumentVersion.document_id)
+                .where(
+                    RuntimeDocument.knowledge_base_id == knowledge_base.id,
+                    RuntimeDocument.status == "active",
+                    DocumentVersion.status == "active",
+                )
+            )
+        ).all()
+    ]
     tweaks = input_request.tweaks.root if input_request.tweaks is not None else {}
     for component_id in _knowledge_component_ids(flow.data):
         value = tweaks.setdefault(component_id, {})
         if isinstance(value, dict):
-            value["knowledge_base"] = physical_alias
+            value.update(
+                {
+                    "knowledge_base": physical_alias,
+                    "metadata_filter": json.dumps(
+                        {"runtime_document_version_id": active_version_ids},
+                        sort_keys=True,
+                    ),
+                }
+            )
     input_request.tweaks = Tweaks(root=tweaks)
 
 
