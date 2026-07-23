@@ -13,6 +13,12 @@ from .auth import (
 )
 from .deployment import Deployment
 from .deployment_provider_account import DeploymentProviderAccount
+from .deployment_release import (
+    DeploymentAcceptanceTest,
+    DeploymentArtifact,
+    DeploymentBuild,
+    DeploymentRelease,
+)
 from .file import File
 from .flow import Flow
 from .flow_version import FlowVersion
@@ -40,7 +46,11 @@ __all__ = [
     "AuthzTeamMember",
     "CasbinRule",
     "Deployment",
+    "DeploymentAcceptanceTest",
+    "DeploymentArtifact",
+    "DeploymentBuild",
     "DeploymentProviderAccount",
+    "DeploymentRelease",
     "File",
     "Flow",
     "FlowVersion",

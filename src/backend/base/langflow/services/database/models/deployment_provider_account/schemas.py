@@ -17,3 +17,4 @@ class DeploymentProviderKey(str, Enum):
     """
 
     WATSONX_ORCHESTRATE = "watsonx-orchestrate"
+    UNNEST_ON_PREM = "unnest-on-prem"
