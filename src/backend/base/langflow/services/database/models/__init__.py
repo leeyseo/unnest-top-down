@@ -30,6 +30,7 @@ from .jobs import Job
 from .knowledge_base import KnowledgeBaseRecord, KnowledgeBaseStatus
 from .memory_base import MemoryBase, MemoryBaseSession, MemoryBaseWorkflowRun, MessageIngestionRecord
 from .message import MessageTable
+from .runtime_document import DocumentVersion, IndexGeneration, RuntimeDocument
 from .traces.model import SpanTable, TraceTable
 from .transactions import TransactionTable
 from .user import User
@@ -53,11 +54,13 @@ __all__ = [
     "DeploymentProviderAccount",
     "DeploymentRelease",
     "DeploymentReleaseFlowVersion",
+    "DocumentVersion",
     "File",
     "Flow",
     "FlowVersion",
     "FlowVersionDeploymentAttachment",
     "Folder",
+    "IndexGeneration",
     "IngestionRun",
     "IngestionRunStatus",
     "Job",
@@ -68,6 +71,7 @@ __all__ = [
     "MemoryBaseWorkflowRun",
     "MessageIngestionRecord",
     "MessageTable",
+    "RuntimeDocument",
     "SSOConfig",
     "SSOUserProfile",
     "SpanTable",
