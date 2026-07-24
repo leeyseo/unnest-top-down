@@ -9,6 +9,7 @@ import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from langflow.services.deployment.offline_package import create_reproducible_tar, write_checksums
 from langflow.services.runtime_backup import RuntimeBackupFile, create_runtime_backup
 from langflow.services.runtime_setup import generate_age_recovery_key
 from langflow.unnestctl import (
@@ -106,6 +107,15 @@ def test_verify_package_checks_checksums_signatures_and_license(tmp_path):
     (package / "images" / "runtime.tar").write_bytes(b"tampered")
     with pytest.raises(PackageValidationError, match="Checksum mismatch"):
         verify_package(package)
+
+
+def test_verify_package_accepts_reproducible_tar_archive(tmp_path):
+    package = _write_signed_package(tmp_path / "package")
+    write_checksums(package)
+    archive = tmp_path / "release.tar"
+    create_reproducible_tar(package, archive)
+
+    assert verify_package(archive)["release_version"] == "1.0.0"
 
 
 def test_verify_package_rejects_checksum_path_traversal(tmp_path):

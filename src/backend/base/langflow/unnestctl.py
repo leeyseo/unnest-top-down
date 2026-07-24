@@ -12,9 +12,12 @@ import platform
 import shutil
 import socket
 import stat
+import tarfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
@@ -24,6 +27,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
 
 from langflow.services.runtime_backup import RuntimeBackupError, restore_runtime_backup
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 SUPPORTED_ARCHITECTURES = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
@@ -45,6 +51,49 @@ def _package_file(root: Path, relative: str) -> Path:
     if path.is_symlink() or root.resolve() not in path.resolve().parents:
         raise PackageValidationError(f"Package path escapes its root: {relative}")
     return path
+
+
+def _extract_package_archive(archive_path: Path, destination: Path) -> None:
+    """Extract a release archive without allowing links, traversal, or special files."""
+    try:
+        with tarfile.open(archive_path, mode="r:") as archive:
+            seen: set[Path] = set()
+            for member in archive.getmembers():
+                relative = Path(member.name)
+                if relative.is_absolute() or not member.name or ".." in relative.parts:
+                    raise PackageValidationError(f"Unsafe release archive path: {member.name}")
+                if member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
+                    raise PackageValidationError(f"Unsupported release archive entry: {member.name}")
+                target = destination / relative
+                if relative in seen or destination.resolve() not in target.resolve().parents:
+                    raise PackageValidationError(f"Duplicate or escaping release archive path: {member.name}")
+                seen.add(relative)
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=False)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source = archive.extractfile(member)
+                if source is None:
+                    raise PackageValidationError(f"Release archive entry cannot be read: {member.name}")
+                with source, target.open("xb") as destination_file:
+                    shutil.copyfileobj(source, destination_file)
+    except (OSError, tarfile.TarError) as exc:
+        raise PackageValidationError("Release archive is missing or invalid") from exc
+
+
+@contextmanager
+def _materialize_package(package: Path) -> Iterator[Path]:
+    """Yield a validated package directory, extracting tar input into a temporary root."""
+    package = package.resolve()
+    if package.is_dir() and not package.is_symlink():
+        yield package
+        return
+    if not package.is_file() or package.is_symlink():
+        raise PackageValidationError("Release package must be a directory or tar archive")
+    with TemporaryDirectory(prefix="unnest-release-") as temporary:
+        root = Path(temporary)
+        _extract_package_archive(package, root)
+        yield root
 
 
 def load_manifest(package: Path) -> dict[str, Any]:
@@ -125,7 +174,7 @@ def verify_license(package: Path, manifest: dict[str, Any]) -> None:
         raise PackageValidationError("Offline license does not permit this release")
 
 
-def verify_package(package: Path) -> dict[str, Any]:
+def _verify_package_directory(package: Path) -> dict[str, Any]:
     package = package.resolve()
     manifest = load_manifest(package)
     contract = manifest.get("package", {})
@@ -170,6 +219,12 @@ def verify_package(package: Path) -> dict[str, Any]:
     return manifest
 
 
+def verify_package(package: Path) -> dict[str, Any]:
+    """Verify an unpacked release directory or a tar release archive."""
+    with _materialize_package(package) as root:
+        return _verify_package_directory(root)
+
+
 def _available_memory() -> int:
     return int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"))
 
@@ -197,8 +252,8 @@ def _tcp_port_available(port: int, host: str = "") -> bool:
     return True
 
 
-def preflight(package: Path) -> list[str]:
-    manifest = verify_package(package)
+def _preflight_directory(package: Path) -> list[str]:
+    manifest = _verify_package_directory(package)
     if platform.system() != "Linux":
         raise PackageValidationError("Only Linux is supported")
     architecture = SUPPORTED_ARCHITECTURES.get(platform.machine().lower())
@@ -256,6 +311,12 @@ def preflight(package: Path) -> list[str]:
     ]
 
 
+def preflight(package: Path) -> list[str]:
+    """Run host and package checks for an unpacked directory or tar archive."""
+    with _materialize_package(package) as root:
+        return _preflight_directory(root)
+
+
 def _run(command: list[str], cwd: Path) -> None:
     import subprocess
 
@@ -281,7 +342,7 @@ def _contains_expected(actual: Any, expected: Any) -> bool:
     return actual == expected
 
 
-def run_acceptance(
+def _run_acceptance_directory(
     package: Path,
     *,
     base_url: str,
@@ -289,7 +350,7 @@ def run_acceptance(
     ca: Path | None = None,
     transport: httpx.BaseTransport | None = None,
 ) -> list[dict[str, Any]]:
-    manifest = verify_package(package)
+    manifest = _verify_package_directory(package)
     parsed_base = urlparse(base_url)
     if (
         parsed_base.scheme not in {"http", "https"}
@@ -362,21 +423,40 @@ def run_acceptance(
     return results
 
 
+def run_acceptance(
+    package: Path,
+    *,
+    base_url: str,
+    api_key: str | None = None,
+    ca: Path | None = None,
+    transport: httpx.BaseTransport | None = None,
+) -> list[dict[str, Any]]:
+    """Run release acceptance tests against an unpacked directory or tar archive."""
+    with _materialize_package(package) as root:
+        return _run_acceptance_directory(
+            root,
+            base_url=base_url,
+            api_key=api_key,
+            ca=ca,
+            transport=transport,
+        )
+
+
 @app.command()
-def verify(package: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
+def verify(package: Path = typer.Argument(..., exists=True)) -> None:
     manifest = verify_package(package)
     typer.echo(f"verified release {manifest.get('release_version')}")
 
 
 @app.command("preflight")
-def check(package: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
+def check(package: Path = typer.Argument(..., exists=True)) -> None:
     for item in preflight(package):
         typer.echo(item)
 
 
 @app.command()
 def acceptance(
-    package: Path = typer.Argument(..., exists=True, file_okay=False),
+    package: Path = typer.Argument(..., exists=True),
     url: str = typer.Option(..., "--url"),
     api_key: str | None = typer.Option(None, envvar="UNNEST_API_KEY", hidden=True),
     ca: Path | None = typer.Option(None, "--ca", exists=True, dir_okay=False),
@@ -387,20 +467,30 @@ def acceptance(
 
 
 @app.command()
-def install(package: Path = typer.Argument(..., exists=True, file_okay=False)) -> None:
-    manifest = verify_package(package)
-    preflight(package)
-    deployment = manifest.get("deployment", {})
-    if deployment.get("orchestrator") == "helm":
-        _run(
-            ["helm", "upgrade", "--install", "unnest", "helm/unnest", "--namespace", "unnest", "--create-namespace"],
-            package,
-        )
-    else:
-        runtime = "docker" if shutil.which("docker") else "podman"
-        for image in sorted((package / "images").glob("*.tar")):
-            _run([runtime, "load", "--input", str(image)], package)
-        _run([runtime, "compose", "-f", "compose/compose.yml", "up", "-d"], package)
+def install(package: Path = typer.Argument(..., exists=True)) -> None:
+    with _materialize_package(package) as root:
+        manifest = _verify_package_directory(root)
+        _preflight_directory(root)
+        deployment = manifest.get("deployment", {})
+        if deployment.get("orchestrator") == "helm":
+            _run(
+                [
+                    "helm",
+                    "upgrade",
+                    "--install",
+                    "unnest",
+                    "helm/unnest",
+                    "--namespace",
+                    "unnest",
+                    "--create-namespace",
+                ],
+                root,
+            )
+        else:
+            runtime = "docker" if shutil.which("docker") else "podman"
+            for image in sorted((root / "images").glob("*.tar")):
+                _run([runtime, "load", "--input", str(image)], root)
+            _run([runtime, "compose", "-f", "compose/compose.yml", "up", "-d"], root)
     typer.echo("installed; open the runtime URL shown by your deployment profile to complete initial setup")
 
 
