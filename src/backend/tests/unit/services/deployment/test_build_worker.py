@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+import yaml
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from langflow.api.v1.schemas.on_prem_deployments import OnPremDeploymentConfig
@@ -279,11 +280,16 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
     )
     worker = DockerImageBuildWorker(config)
     commands: list[list[str]] = []
+    dockerfiles: list[str] = []
 
     def fake_run(command: list[str], *, cwd: Path, env=None) -> str:
         del cwd, env
         commands.append(command)
         if command[0] == "buildctl":
+            context_argument = next(value for value in command if value.startswith("context="))
+            dockerfiles.append(
+                (Path(context_argument.removeprefix("context=")) / "Dockerfile").read_text(encoding="utf-8")
+            )
             output = command[command.index("--output") + 1]
             destination = next(value.removeprefix("dest=") for value in output.split(",") if value.startswith("dest="))
             Path(destination).write_bytes(b"deterministic docker image")
@@ -331,25 +337,37 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
         compose = package.extractfile("compose/compose.yml")
         assert compose is not None
         compose_text = compose.read().decode()
+        compose_config = yaml.safe_load(compose_text)
+        restore_service = compose_config["services"]["restore"]
+        assert restore_service["profiles"] == ["maintenance"]
+        assert restore_service["user"] == "1000:0"
+        assert restore_service["read_only"] is True
+        assert restore_service["cap_drop"] == ["ALL"]
         assert "sandbox-controller:" in compose_text
         assert "sandbox-executor:" in compose_text
-        assert compose_text.count("group_add:") == 2
-        assert compose_text.count('"${UNNEST_INSTALL_GID}"') == 2
+        assert "restore:" in compose_text
+        assert 'profiles: ["maintenance"]' in compose_text
+        assert 'user: "1000:0"' in compose_text
+        assert compose_text.count("group_add:") == 3
+        assert compose_text.count('"${UNNEST_INSTALL_GID}"') == 3
         assert compose_text.count('UNNEST_SANDBOX_EXECUTION_TIMEOUT_SECONDS: "300"') == 2
         assert compose_text.count('LANGFLOW_MAX_FILE_SIZE_UPLOAD: "512"') == 2
+        assert compose_text.count("TMPDIR: /app/langflow") == 2
         assert compose_text.count(":ro,Z") == 3
         assert "read_only: true" in compose_text
         assert "no-new-privileges:true" in compose_text
         assert "sandbox-control:" in compose_text
         assert "sandbox-egress:" in compose_text
         assert compose_text.count("internal: true") == 3
+    assert all("command -v pg_dump" in dockerfile for dockerfile in dockerfiles)
+    assert all("command -v pg_restore" in dockerfile for dockerfile in dockerfiles)
     assert [command[0] for command in commands].count("buildctl") == 2
     assert [command[0] for command in commands].count("trivy") == 12
     assert [command[0] for command in commands].count("cosign") == 2
     assert [command[0] for command in commands].count("skopeo") == 6
-    assert worker._scan_findings(
-        {"Results": [{"Secrets": [{"Severity": "HIGH", "RuleID": "embedded-api-key"}]}]}
-    ) == ["secret:embedded-api-key"]
+    assert worker._scan_findings({"Results": [{"Secrets": [{"Severity": "HIGH", "RuleID": "embedded-api-key"}]}]}) == [
+        "secret:embedded-api-key"
+    ]
 
     (source_uploads / str(source_id)).write_bytes(b"tampered")
     tampered_request = first_request.model_copy(update={"build_id": uuid4()})
@@ -360,9 +378,7 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
     missing_request = first_request.model_copy(deep=True)
     missing_hash = f"sha256:{'e' * 64}"
     missing_request.manifest["dependency_lock"]["python_packages"][0]["hashes"] = [missing_hash]
-    missing_request.manifest["flows"][0]["declared_dependencies"]["python_packages"][0]["hashes"] = [
-        missing_hash
-    ]
+    missing_request.manifest["flows"][0]["declared_dependencies"]["python_packages"][0]["hashes"] = [missing_hash]
     missing_job = tmp_path / "missing-wheel-job"
     missing_job.mkdir()
     with pytest.raises(DependencyLockError, match="does not satisfy the complete lock"):

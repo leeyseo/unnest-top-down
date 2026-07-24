@@ -61,6 +61,7 @@ RUN apt-get update \
         curl \
         git \
         libpq5 \
+        postgresql-client \
         gnupg \
         xz-utils \
     && apt-get clean \

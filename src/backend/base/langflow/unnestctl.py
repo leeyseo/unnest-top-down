@@ -65,6 +65,8 @@ MAX_SIGNED_METADATA_SIZE = 16 * 1024**2
 PACKAGE_LAYOUT_VERSION = 2
 ASCII_CONTROL_END = 32
 ASCII_DELETE = 127
+IDENTITY_PRIVATE_MODE = 0o600
+IDENTITY_GROUP_READABLE_MODE = 0o640
 MAX_DNS_NAME_LENGTH = 253
 _UNSIGNED_PACKAGE_FILES = frozenset({CHECKSUM_FILE, CHECKSUM_SIGNATURE_FILE})
 _REQUIRED_LAYOUT_FILES = frozenset(
@@ -886,8 +888,7 @@ def _prepare_install_directory(
             shutil.copyfile(package / source_relative, destination)
         environment = staging_directory / ".env"
         environment.write_text(
-            f"UNNEST_DB_PASSWORD={secrets.token_urlsafe(32)}\n"
-            f"UNNEST_INSTALL_GID={os.getegid()}\n",
+            f"UNNEST_DB_PASSWORD={secrets.token_urlsafe(32)}\nUNNEST_INSTALL_GID={os.getegid()}\n",
             encoding="utf-8",
         )
         environment.chmod(0o600)
@@ -925,9 +926,8 @@ def _installed_release(install_root: Path) -> tuple[Path, dict[str, Any], str]:
     if root not in release_directory.parents or not release_directory.is_dir():
         raise PackageValidationError("Installed release directory is invalid")
     manifest = load_manifest(release_directory)
-    if (
-        marker.get("release_version") != manifest.get("release_version")
-        or marker.get("release_digest") != manifest.get("release_digest")
+    if marker.get("release_version") != manifest.get("release_version") or marker.get("release_digest") != manifest.get(
+        "release_digest"
     ):
         raise PackageValidationError("Installed release marker does not match its manifest")
     raw_url = marker.get("url")
@@ -988,11 +988,7 @@ def inspect_installation(
         release_directory,
     )
     running = sorted({line.strip() for line in running_output.splitlines() if line.strip()})
-    expected = sorted(
-        service
-        for service in manifest.get("services", [])
-        if isinstance(service, str)
-    )
+    expected = sorted(service for service in manifest.get("services", []) if isinstance(service, str))
     missing = sorted(set(expected).difference(running))
     unexpected = sorted(set(running).difference(expected))
     verify: bool | str = str(release_directory / "tls" / "server.crt") if transport is None else False
@@ -1075,11 +1071,14 @@ def download_installed_backup(
             digest = hashlib.sha256()
             received = 0
             try:
-                with os.fdopen(descriptor, "wb") as output, client.stream(
-                    "GET",
-                    f"/api/v1/admin/backups/{normalized_id}/download",
-                    headers=headers,
-                ) as response:
+                with (
+                    os.fdopen(descriptor, "wb") as output,
+                    client.stream(
+                        "GET",
+                        f"/api/v1/admin/backups/{normalized_id}/download",
+                        headers=headers,
+                    ) as response,
+                ):
                     response.raise_for_status()
                     for chunk in response.iter_bytes(1024 * 1024):
                         received += len(chunk)
@@ -1346,28 +1345,182 @@ def backup(
     typer.echo(f"backup saved: {destination}")
 
 
+def _installed_compose_command(*arguments: str) -> list[str]:
+    return [
+        "docker",
+        "compose",
+        "--env-file",
+        ".env",
+        "-f",
+        "compose.yml",
+        *arguments,
+    ]
+
+
+def _installed_runtime_gid(release_directory: Path) -> int:
+    try:
+        value = next(
+            line.partition("=")[2]
+            for line in (release_directory / ".env").read_text(encoding="utf-8").splitlines()
+            if line.startswith("UNNEST_INSTALL_GID=")
+        )
+        group_id = int(value)
+    except (OSError, StopIteration, ValueError) as exc:
+        raise PackageValidationError("Installed Runtime group is invalid") from exc
+    if group_id < 0:
+        raise PackageValidationError("Installed Runtime group is invalid")
+    if os.geteuid() != 0 and os.getegid() != group_id:
+        raise PackageValidationError("Run restore as root or as the account that installed Unnest")
+    return group_id
+
+
+def _restore_installed_backup(
+    install_root: Path,
+    *,
+    backup: Path,
+    identity_file: Path,
+) -> None:
+    release_directory, manifest, _base_url = _installed_release(install_root)
+    if backup.is_symlink() or identity_file.is_symlink():
+        raise PackageValidationError("Backup and recovery identity must not be symbolic links")
+    backup = backup.resolve()
+    identity_file = identity_file.resolve()
+    runtime_gid = _installed_runtime_gid(release_directory)
+    stopped_services = [
+        "runtime",
+        "redis",
+        "sandbox-controller",
+        "sandbox-executor",
+        "sandbox-gateway",
+        "sandbox-egress-proxy",
+    ]
+    state_restored = False
+    try:
+        _run(_installed_compose_command("stop", *stopped_services), release_directory)
+        _run(
+            _installed_compose_command("up", "-d", "--pull", "never", "postgresql"),
+            release_directory,
+        )
+        with TemporaryDirectory(prefix=".unnest-restore-", dir=release_directory) as temporary:
+            restore_input = Path(temporary)
+            staged_backup = restore_input / "backup.unnest-backup"
+            staged_identity = restore_input / "recovery.txt"
+            shutil.copyfile(backup, staged_backup)
+            shutil.copyfile(identity_file, staged_identity)
+            restore_input.chmod(0o750)
+            staged_backup.chmod(0o640)
+            staged_identity.chmod(0o640)
+            if os.geteuid() == 0:
+                os.chown(restore_input, -1, runtime_gid)
+                os.chown(staged_backup, -1, runtime_gid)
+                os.chown(staged_identity, -1, runtime_gid)
+            _run(
+                _installed_compose_command(
+                    "--profile",
+                    "maintenance",
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "--volume",
+                    f"{restore_input}:/restore-input:ro,Z",
+                    "restore",
+                    "python",
+                    "-m",
+                    "langflow.unnestctl",
+                    "restore",
+                    "/restore-input/backup.unnest-backup",
+                    "--identity",
+                    "/restore-input/recovery.txt",
+                    "--storage-dir",
+                    "/app/langflow",
+                    "--master-key",
+                    "/app/langflow/secrets/master.key",
+                    "--expected-release",
+                    str(manifest["release_version"]),
+                    "--allow-group-readable-identity",
+                    "--runtime-stopped",
+                    "--yes",
+                ),
+                release_directory,
+            )
+            state_restored = True
+        _run(
+            _installed_compose_command("up", "-d", "--pull", "never", "redis"),
+            release_directory,
+        )
+        _run(
+            _installed_compose_command("exec", "-T", "redis", "redis-cli", "FLUSHALL"),
+            release_directory,
+        )
+    except (OSError, PackageValidationError) as restore_error:
+        if state_restored:
+            raise PackageValidationError(
+                "Runtime state was restored but Redis could not be reset; the application remains stopped"
+            ) from restore_error
+        try:
+            _run(
+                _installed_compose_command("up", "-d", "--pull", "never"),
+                release_directory,
+            )
+        except PackageValidationError as restart_error:
+            raise PackageValidationError(
+                "Restore failed and the previous Runtime stack could not be restarted"
+            ) from restart_error
+        if isinstance(restore_error, PackageValidationError):
+            raise
+        raise PackageValidationError("Restore failed while staging the encrypted backup") from restore_error
+    _run(
+        _installed_compose_command("up", "-d", "--pull", "never"),
+        release_directory,
+    )
+
+
 @app.command()
 def restore(
     backup: Path = typer.Argument(..., exists=True, dir_okay=False),
     identity_file: Path = typer.Option(..., "--identity", exists=True, dir_okay=False),
-    database_url: str = typer.Option(..., envvar="LANGFLOW_DATABASE_URL"),
+    install_root: Path = typer.Option(Path("/opt/unnest"), "--install-root"),
+    database_url: str | None = typer.Option(None, envvar="LANGFLOW_DATABASE_URL"),
     storage_directory: Path = typer.Option(Path("/opt/unnest/data"), "--storage-dir"),
     master_key: Path = typer.Option(Path("/opt/unnest/secrets/master.key"), "--master-key"),
-    license_directory: Path = typer.Option(Path("/opt/unnest/license"), "--license-dir"),
-    key_directory: Path = typer.Option(Path("/opt/unnest/keys"), "--key-dir"),
+    license_directory: Path | None = typer.Option(None, "--license-dir"),
+    key_directory: Path | None = typer.Option(None, "--key-dir"),
+    expected_release_version: str | None = typer.Option(None, "--expected-release", hidden=True),
+    allow_group_readable_identity: bool = typer.Option(  # noqa: FBT001
+        False,  # noqa: FBT003
+        "--allow-group-readable-identity",
+        hidden=True,
+    ),
     runtime_stopped: bool = typer.Option(False, "--runtime-stopped"),  # noqa: FBT001, FBT003
     yes: bool = typer.Option(False, "--yes"),  # noqa: FBT001, FBT003
 ) -> None:
     if platform.system() != "Linux":
         raise PackageValidationError("Only Linux is supported")
-    if not runtime_stopped:
+    if backup.is_symlink() or identity_file.is_symlink():
+        raise PackageValidationError("Backup and recovery identity must not be symbolic links")
+    if database_url is not None and not runtime_stopped:
         raise PackageValidationError(
             "Stop every Runtime, scheduler, and worker instance before restore, then pass --runtime-stopped"
         )
-    if stat.S_IMODE(identity_file.stat().st_mode) & 0o077:
+    identity_stat = identity_file.stat()
+    identity_mode = stat.S_IMODE(identity_stat.st_mode)
+    internal_group_copy = (
+        allow_group_readable_identity
+        and identity_mode == IDENTITY_GROUP_READABLE_MODE
+        and identity_stat.st_gid in {os.getegid(), *os.getgroups()}
+    )
+    if identity_mode != IDENTITY_PRIVATE_MODE and not internal_group_copy:
         raise PackageValidationError("Recovery identity file must have mode 0600")
     if not yes and not typer.confirm("Restore will replace runtime database, files, and keys. Continue?"):
         raise typer.Abort
+    if database_url is None:
+        _restore_installed_backup(
+            install_root,
+            backup=backup,
+            identity_file=identity_file,
+        )
+        typer.echo("restored installed Runtime; wait for /ready and run unnestctl acceptance")
+        return
     try:
         result = restore_runtime_backup(
             path=backup,
@@ -1377,6 +1530,7 @@ def restore(
             master_key_destination=master_key,
             license_directory=license_directory,
             key_directory=key_directory,
+            expected_release_version=expected_release_version,
         )
     except (OSError, RuntimeBackupError, ValueError) as exc:
         raise PackageValidationError("Runtime restore failed verification or was rolled back") from exc

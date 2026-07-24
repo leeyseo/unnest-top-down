@@ -48,7 +48,8 @@ RUN if [ -s /opt/unnest/release/wheels/requirements.lock ]; then \
         --find-links=/opt/unnest/release/wheels \
         --require-hashes \
         -r /opt/unnest/release/wheels/requirements.lock; \
-    fi && python -c "import langflow,pathlib; \
+    fi && command -v pg_dump >/dev/null && command -v pg_restore >/dev/null && \
+    python -c "import langflow,pathlib; \
 p=pathlib.Path(langflow.__file__).parent/'frontend/.unnest-runtime-profile'; assert p.is_file()"
 USER 1000
 CMD ["uvicorn","langflow.main:create_runtime_app","--factory","--host","0.0.0.0","--port","7860"]
@@ -125,6 +126,7 @@ services:
       UNNEST_SANDBOX_WORKER_KEY: /opt/unnest/sandbox-tls/client.key
       UNNEST_MASTER_KEY_FILE: /app/langflow/secrets/master.key
       UNNEST_BACKUP_DIR: /app/langflow/backups
+      TMPDIR: /app/langflow
       DO_NOT_TRACK: "true"
       LANGFLOW_DO_NOT_TRACK: "true"
     ports:
@@ -137,6 +139,34 @@ services:
     tmpfs:
       - /tmp:size=256m,mode=1777
     restart: unless-stopped
+
+  restore:
+    profiles: ["maintenance"]
+    image: {runtime_image}
+    pull_policy: never
+    user: "1000:0"
+    group_add:
+      - "${{UNNEST_INSTALL_GID}}"
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      LANGFLOW_DATABASE_URL: postgresql://unnest:${{UNNEST_DB_PASSWORD}}@postgresql:5432/unnest
+      UNNEST_BACKUP_DIR: /app/langflow/backups
+      TMPDIR: /app/langflow
+      DO_NOT_TRACK: "true"
+      LANGFLOW_DO_NOT_TRACK: "true"
+    volumes:
+      - runtime-data:/app/langflow
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    networks:
+      - default
 
   sandbox-controller:
     image: {runtime_image}
@@ -425,9 +455,7 @@ class BuildWorkerConfig:
             redis_image=str(required["redis_image"]),
             cosign_key=Path(str(required["cosign_key"])),
             cosign_public_key=Path(str(required["cosign_public_key"])),
-            wheelhouse=(
-                Path(value).resolve() if (value := os.getenv("UNNEST_OFFLINE_WHEELHOUSE")) else None
-            ),
+            wheelhouse=(Path(value).resolve() if (value := os.getenv("UNNEST_OFFLINE_WHEELHOUSE")) else None),
             registry_credentials=(
                 Path(value).resolve() if (value := os.getenv("UNNEST_REGISTRY_CREDENTIALS")) else None
             ),
@@ -455,9 +483,7 @@ class BuildWorkerConfig:
             ("Cosign public key", self.cosign_public_key),
         ):
             is_directory = label in {"license directory", "support image directory"}
-            if (is_directory and not path.is_dir()) or (
-                not is_directory and not path.is_file()
-            ):
+            if (is_directory and not path.is_dir()) or (not is_directory and not path.is_file()):
                 msg = f"{label} does not exist: {path}"
                 raise ValueError(msg)
         for label, reference in (
@@ -470,9 +496,7 @@ class BuildWorkerConfig:
                 raise ValueError(msg)
         _image_tag(self.postgres_image)
         _image_tag(self.redis_image)
-        if self.wheelhouse is not None and (
-            not self.wheelhouse.is_dir() or self.wheelhouse.is_symlink()
-        ):
+        if self.wheelhouse is not None and (not self.wheelhouse.is_dir() or self.wheelhouse.is_symlink()):
             msg = f"Offline wheelhouse is invalid: {self.wheelhouse}"
             raise ValueError(msg)
         for name in ("postgresql.tar", "redis.tar"):
@@ -982,10 +1006,7 @@ def create_build_worker_app(worker: DockerImageBuildWorker | None = None) -> Fas
                 msg = "Multipart build request is missing its JSON contract"
                 raise SourceDocumentError(msg)
             request = BuildRequest.model_validate_json(raw_request)
-            expected = {
-                str(entry["id"]): entry
-                for entry in validated_source_document_manifest(request.manifest)
-            }
+            expected = {str(entry["id"]): entry for entry in validated_source_document_manifest(request.manifest)}
             uploads = form.getlist("documents")
             if len(uploads) != len(expected):
                 msg = "Uploaded source documents do not match the release manifest"

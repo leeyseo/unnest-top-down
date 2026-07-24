@@ -244,8 +244,12 @@ the exact running Compose service set, and probes `/health` and `/ready` over
 the installed TLS certificate. `backup` authenticates to the local Runtime,
 creates the recovery-key-encrypted archive, downloads it with mode `0600`, and
 rejects or deletes a download whose size or SHA-256 digest differs from the
-Runtime response. The administrator password is read from a hidden prompt or
-`UNNEST_ADMIN_PASSWORD`, not written to the command output.
+Runtime response. `restore` stops the Runtime and workers while keeping the
+database online, verifies and restores the archive in a non-root maintenance
+container, clears stale Redis work, and restarts the installed stack. The
+backup must match the installed Release version. The administrator password is
+read from a hidden prompt or `UNNEST_ADMIN_PASSWORD`, not written to the command
+output.
 
 ## Offline acceptance test
 

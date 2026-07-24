@@ -198,7 +198,10 @@ def _write_installed_release(
     (release / "manifest/release.json").write_text(json.dumps(manifest), encoding="utf-8")
     (release / "tls").mkdir()
     (release / "tls/server.crt").write_text("test certificate", encoding="utf-8")
-    (release / ".env").write_text("UNNEST_DB_PASSWORD=test\n", encoding="utf-8")
+    (release / ".env").write_text(
+        f"UNNEST_DB_PASSWORD=test\nUNNEST_INSTALL_GID={os.getegid()}\n",
+        encoding="utf-8",
+    )
     (release / "compose.yml").write_text("services: {}\n", encoding="utf-8")
     (root / "current.json").write_text(
         json.dumps(
@@ -349,12 +352,14 @@ def test_install_loads_verified_images_and_starts_persistent_compose(tmp_path, m
     worker_tls = release_directory / "sandbox-tls" / "worker"
     client_certificate = x509.load_pem_x509_certificate((runtime_tls / "client.crt").read_bytes())
     server_certificate = x509.load_pem_x509_certificate((worker_tls / "server.crt").read_bytes())
-    assert ExtendedKeyUsageOID.CLIENT_AUTH in client_certificate.extensions.get_extension_for_class(
-        x509.ExtendedKeyUsage
-    ).value
-    assert ExtendedKeyUsageOID.SERVER_AUTH in server_certificate.extensions.get_extension_for_class(
-        x509.ExtendedKeyUsage
-    ).value
+    assert (
+        ExtendedKeyUsageOID.CLIENT_AUTH
+        in client_certificate.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+    )
+    assert (
+        ExtendedKeyUsageOID.SERVER_AUTH
+        in server_certificate.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
+    )
     assert (runtime_tls / "client.key").read_bytes() != (worker_tls / "server.key").read_bytes()
     assert stat.S_IMODE((runtime_tls / "client.key").stat().st_mode) == 0o640
     assert stat.S_IMODE((worker_tls / "server.key").stat().st_mode) == 0o640
@@ -570,3 +575,143 @@ def test_restore_command_requires_stopped_runtime_and_restores_offline_state(tmp
     assert value == ("restored",)
     assert (storage / "runtime-documents/file.txt").read_bytes() == b"restored file"
     assert target_key.read_bytes() == b"restored-key"
+
+
+def test_restore_command_orchestrates_installed_compose_stack(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
+    install_root = tmp_path / "installed"
+    release = _write_installed_release(
+        install_root,
+        package,
+        services=[
+            "runtime",
+            "postgresql",
+            "redis",
+            "sandbox-controller",
+            "sandbox-executor",
+            "sandbox-gateway",
+            "sandbox-egress-proxy",
+        ],
+    )
+    backup = tmp_path / "runtime.unnest-backup"
+    backup.write_bytes(b"encrypted backup")
+    identity = tmp_path / "recovery.txt"
+    identity.write_text("AGE-SECRET-KEY-test", encoding="utf-8")
+    identity.chmod(0o600)
+    commands: list[tuple[list[str], Path]] = []
+    monkeypatch.setattr("langflow.unnestctl.platform.system", lambda: "Linux")
+    monkeypatch.setattr(
+        "langflow.unnestctl._run",
+        lambda command, cwd: commands.append((command, cwd)),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "restore",
+            str(backup),
+            "--identity",
+            str(identity),
+            "--install-root",
+            str(install_root),
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert all(cwd == release for _command, cwd in commands)
+    assert commands[0][0][-7:] == [
+        "stop",
+        "runtime",
+        "redis",
+        "sandbox-controller",
+        "sandbox-executor",
+        "sandbox-gateway",
+        "sandbox-egress-proxy",
+    ]
+    restore_command = commands[2][0]
+    assert restore_command[6:11] == ["--profile", "maintenance", "run", "--rm", "--no-deps"]
+    assert "--expected-release" in restore_command
+    assert restore_command[restore_command.index("--expected-release") + 1] == "1.0.0"
+    assert "--allow-group-readable-identity" in restore_command
+    assert str(backup) not in restore_command
+    assert str(identity) not in restore_command
+    assert commands[-2][0][-4:] == ["-T", "redis", "redis-cli", "FLUSHALL"]
+    assert commands[-1][0][-4:] == ["up", "-d", "--pull", "never"]
+    assert list(release.glob(".unnest-restore-*")) == []
+
+
+def test_restore_command_restarts_stack_after_maintenance_failure(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
+    install_root = tmp_path / "installed"
+    _write_installed_release(install_root, package, services=["runtime", "postgresql", "redis"])
+    backup = tmp_path / "runtime.unnest-backup"
+    backup.write_bytes(b"encrypted backup")
+    identity = tmp_path / "recovery.txt"
+    identity.write_text("AGE-SECRET-KEY-test", encoding="utf-8")
+    identity.chmod(0o600)
+    commands: list[list[str]] = []
+
+    def fail_restore(command: list[str], cwd: Path) -> None:
+        del cwd
+        commands.append(command)
+        if "maintenance" in command:
+            message = "maintenance failed"
+            raise PackageValidationError(message)
+
+    monkeypatch.setattr("langflow.unnestctl.platform.system", lambda: "Linux")
+    monkeypatch.setattr("langflow.unnestctl._run", fail_restore)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "restore",
+            str(backup),
+            "--identity",
+            str(identity),
+            "--install-root",
+            str(install_root),
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert commands[-1][-4:] == ["up", "-d", "--pull", "never"]
+
+
+def test_restore_command_keeps_runtime_stopped_when_cache_reset_fails(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
+    install_root = tmp_path / "installed"
+    _write_installed_release(install_root, package, services=["runtime", "postgresql", "redis"])
+    backup = tmp_path / "runtime.unnest-backup"
+    backup.write_bytes(b"encrypted backup")
+    identity = tmp_path / "recovery.txt"
+    identity.write_text("AGE-SECRET-KEY-test", encoding="utf-8")
+    identity.chmod(0o600)
+    commands: list[list[str]] = []
+
+    def fail_cache_reset(command: list[str], cwd: Path) -> None:
+        del cwd
+        commands.append(command)
+        if "FLUSHALL" in command:
+            message = "cache reset failed"
+            raise PackageValidationError(message)
+
+    monkeypatch.setattr("langflow.unnestctl.platform.system", lambda: "Linux")
+    monkeypatch.setattr("langflow.unnestctl._run", fail_cache_reset)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "restore",
+            str(backup),
+            "--identity",
+            str(identity),
+            "--install-root",
+            str(install_root),
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert commands[-1][-4:] == ["-T", "redis", "redis-cli", "FLUSHALL"]

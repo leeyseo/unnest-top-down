@@ -333,9 +333,7 @@ def _verify_open_archive(archive: tarfile.TarFile) -> tuple[dict[str, Any], dict
 
 def verify_runtime_backup(path: Path, identity: str) -> dict[str, Any]:
     try:
-        with _decrypted_backup(path, identity) as temporary_path, tarfile.open(
-            temporary_path, mode="r:"
-        ) as archive:
+        with _decrypted_backup(path, identity) as temporary_path, tarfile.open(temporary_path, mode="r:") as archive:
             manifest, _members = _verify_open_archive(archive)
             return manifest
     except (tarfile.TarError, json.JSONDecodeError, ValueError) as exc:
@@ -349,9 +347,7 @@ def extract_runtime_backup(path: Path, identity: str, destination: Path) -> dict
         raise RuntimeBackupError(msg)
     destination.mkdir(mode=0o700, parents=False)
     try:
-        with _decrypted_backup(path, identity) as temporary_path, tarfile.open(
-            temporary_path, mode="r:"
-        ) as archive:
+        with _decrypted_backup(path, identity) as temporary_path, tarfile.open(temporary_path, mode="r:") as archive:
             manifest, members = _verify_open_archive(archive)
             for name, member in members.items():
                 source = archive.extractfile(member)
@@ -489,6 +485,7 @@ def restore_runtime_backup(
     master_key_destination: Path,
     license_directory: Path | None = None,
     key_directory: Path | None = None,
+    expected_release_version: str | None = None,
 ) -> RuntimeRestoreResult:
     for target in (storage_directory, master_key_destination.parent):
         if not target.is_absolute() or target.is_symlink():
@@ -502,6 +499,9 @@ def restore_runtime_backup(
     with tempfile.TemporaryDirectory(prefix="unnest-restore-") as temporary:
         extracted = Path(temporary) / "extracted"
         manifest = extract_runtime_backup(path, identity, extracted)
+        if expected_release_version is not None and manifest.get("release_version") != expected_release_version:
+            msg = "Runtime backup release does not match the installed release"
+            raise RuntimeBackupError(msg)
         rollback = rollback_root / f"{manifest['backup_id']}-{uuid4()}"
         rollback.mkdir(mode=0o700)
         storage_rollback = rollback / "storage"
@@ -548,9 +548,7 @@ def restore_runtime_backup(
                 master_key_rollback.mkdir(mode=0o700, parents=True, exist_ok=True)
                 shutil.copy2(master_key_destination, master_key_rollback / "master.key")
             master_key_destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            temporary_key = master_key_destination.with_name(
-                f".{master_key_destination.name}.unnest-restore-{uuid4()}"
-            )
+            temporary_key = master_key_destination.with_name(f".{master_key_destination.name}.unnest-restore-{uuid4()}")
             shutil.copy2(extracted / "secrets/master.key", temporary_key)
             temporary_key.chmod(0o600)
             temporary_key.replace(master_key_destination)

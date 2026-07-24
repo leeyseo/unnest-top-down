@@ -187,3 +187,46 @@ def test_runtime_restore_rolls_back_files_when_database_restore_fails(monkeypatc
 
     assert document.read_bytes() == b"old document"
     assert target_key.read_bytes() == b"old-master-key"
+
+
+def test_runtime_restore_rejects_a_different_release_before_mutation(monkeypatch, tmp_path):
+    backup_database = tmp_path / "backup.db"
+    with sqlite3.connect(backup_database) as connection:
+        connection.execute("CREATE TABLE state (value TEXT NOT NULL)")
+    backup_key = tmp_path / "backup-master.key"
+    backup_key.write_bytes(b"new-key")
+    monkeypatch.setenv("UNNEST_BACKUP_DIR", str(tmp_path / "backups"))
+    identity, recipient = generate_age_recovery_key()
+    backup = create_runtime_backup(
+        database_url=f"sqlite:///{backup_database}",
+        recipient=recipient,
+        master_key=backup_key,
+        files=[RuntimeBackupFile(archive_path="storage/document.txt", contents=b"new")],
+        release_version="2.0.0",
+    )
+    target_database = tmp_path / "target.db"
+    with sqlite3.connect(target_database) as connection:
+        connection.execute("CREATE TABLE state (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO state VALUES ('old')")
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    document = storage / "document.txt"
+    document.write_bytes(b"old")
+    target_key = tmp_path / "secrets/master.key"
+    target_key.parent.mkdir()
+    target_key.write_bytes(b"old-key")
+
+    with pytest.raises(RuntimeBackupError, match="does not match"):
+        restore_runtime_backup(
+            path=backup.path,
+            identity=identity,
+            database_url=f"sqlite:///{target_database}",
+            storage_directory=storage,
+            master_key_destination=target_key,
+            expected_release_version="1.0.0",
+        )
+
+    with sqlite3.connect(target_database) as connection:
+        assert connection.execute("SELECT value FROM state").fetchone() == ("old",)
+    assert document.read_bytes() == b"old"
+    assert target_key.read_bytes() == b"old-key"
