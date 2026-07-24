@@ -18,7 +18,7 @@ def _paths() -> tuple[Path, Path, Path]:
     return (
         Path(os.getenv("UNNEST_LICENSE_FILE", "/opt/unnest/license/license.json")),
         Path(os.getenv("UNNEST_LICENSE_SIGNATURE", "/opt/unnest/license/license.sig")),
-        Path(os.getenv("UNNEST_LICENSE_PUBLIC_KEY", "/opt/unnest/keys/license.pub")),
+        Path(os.getenv("UNNEST_LICENSE_PUBLIC_KEY", "/opt/unnest/trust/vendor-license.pem")),
     )
 
 
@@ -35,7 +35,7 @@ def _verify(public_key_blob: bytes, signature_blob: bytes, license_blob: bytes) 
         raise TypeError
 
 
-def runtime_license_status(release_version: str | None = None) -> dict[str, Any]:
+def runtime_license_status(release_digest: str | None = None) -> dict[str, Any]:
     license_path, signature_path, public_key_path = _paths()
     try:
         license_blob = license_path.read_bytes()
@@ -46,8 +46,8 @@ def runtime_license_status(release_version: str | None = None) -> dict[str, Any]
         expires_at = datetime.fromisoformat(str(payload["expires_at"]).replace("Z", "+00:00"))
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
-        allowed_releases = payload.get("release_versions", [])
-        if not isinstance(allowed_releases, list):
+        licensed_release_digest = payload["release_digest"]
+        if not isinstance(licensed_release_digest, str):
             raise TypeError
     except FileNotFoundError:
         return {"valid": False, "reason": "missing", "expires_at": None, "issued_to": None}
@@ -57,7 +57,7 @@ def runtime_license_status(release_version: str | None = None) -> dict[str, Any]
     reason = None
     if expires_at <= datetime.now(timezone.utc):
         reason = "expired"
-    elif release_version and allowed_releases and release_version not in allowed_releases:
+    elif not release_digest or licensed_release_digest != release_digest:
         reason = "release_not_permitted"
     return {
         "valid": reason is None,

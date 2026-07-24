@@ -3,6 +3,8 @@ import hashlib
 import json
 import socket
 import sqlite3
+import tarfile
+from io import BytesIO
 from pathlib import Path
 
 import httpx
@@ -23,22 +25,36 @@ from langflow.unnestctl import (
 from typer.testing import CliRunner
 
 
-def _write_signed_package(root: Path) -> Path:
+def _write_signed_package(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     signing_key = Ed25519PrivateKey.generate()
     license_key = Ed25519PrivateKey.generate()
+    release_digest = f"sha256:{'1' * 64}"
+    signing_public_key = signing_key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    signing_der = signing_key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    signer_fingerprint = hashlib.sha256(signing_der).hexdigest()
+    trust_directory = root.parent / "trust" / "releases"
+    trust_directory.mkdir(parents=True)
+    (trust_directory / f"{signer_fingerprint}.pem").write_bytes(signing_public_key)
+    license_public_key = root.parent / "trust" / "vendor-license.pem"
+    license_public_key.write_bytes(
+        license_key.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    monkeypatch.setenv("UNNEST_RELEASE_TRUST_DIR", str(trust_directory))
+    monkeypatch.setenv("UNNEST_LICENSE_PUBLIC_KEY", str(license_public_key))
     files = {
         "images/runtime.tar": b"oci image",
         "license/license.json": json.dumps(
-            {"expires_at": "2099-01-01T00:00:00Z", "release_versions": ["1.0.0"]}
+            {"expires_at": "2099-01-01T00:00:00Z", "release_digest": release_digest}
         ).encode(),
-        "keys/cosign.pub": signing_key.public_key().public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        ),
-        "keys/license.pub": license_key.public_key().public_bytes(
-            serialization.Encoding.PEM,
-            serialization.PublicFormat.SubjectPublicKeyInfo,
-        ),
         "tests/acceptance.json": json.dumps(
             [
                 {
@@ -61,7 +77,8 @@ def _write_signed_package(root: Path) -> Path:
     manifest = {
         "provider": "unnest-on-prem",
         "release_version": "1.0.0",
-        "build": {"signing_enabled": True},
+        "release_digest": release_digest,
+        "build": {"signing_enabled": True, "signer_fingerprint": f"sha256:{signer_fingerprint}"},
         "deployment": {
             "architecture": "amd64",
             "orchestrator": "compose",
@@ -71,20 +88,17 @@ def _write_signed_package(root: Path) -> Path:
         "external_endpoints": [],
         "acceptance_tests": json.loads(files["tests/acceptance.json"]),
         "package": {
+            "layout_version": 2,
             "required_files": [
                 "manifest/release.json",
                 "license/license.json",
                 "license/license.sig",
-                "keys/license.pub",
-                "keys/cosign.pub",
-                "signatures/release-manifest.sig",
                 "tests/acceptance.json",
             ],
             "required_globs": ["images/*.tar"],
         },
     }
     files["manifest/release.json"] = json.dumps(manifest, sort_keys=True).encode()
-    files["signatures/release-manifest.sig"] = base64.b64encode(signing_key.sign(files["manifest/release.json"]))
     for relative, content in files.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,12 +109,13 @@ def _write_signed_package(root: Path) -> Path:
     ).encode()
     (root / "checksums.sha256").write_bytes(checksum)
     signature_path = root / "signatures" / "checksums.sig"
+    signature_path.parent.mkdir(parents=True, exist_ok=True)
     signature_path.write_bytes(base64.b64encode(signing_key.sign(checksum)))
     return root
 
 
-def test_verify_package_checks_checksums_signatures_and_license(tmp_path):
-    package = _write_signed_package(tmp_path)
+def test_verify_package_checks_checksums_signatures_and_license(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
 
     assert verify_package(package)["release_version"] == "1.0.0"
 
@@ -109,8 +124,8 @@ def test_verify_package_checks_checksums_signatures_and_license(tmp_path):
         verify_package(package)
 
 
-def test_verify_package_accepts_reproducible_tar_archive(tmp_path):
-    package = _write_signed_package(tmp_path / "package")
+def test_verify_package_accepts_reproducible_tar_archive(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
     write_checksums(package)
     archive = tmp_path / "release.tar"
     create_reproducible_tar(package, archive)
@@ -118,17 +133,69 @@ def test_verify_package_accepts_reproducible_tar_archive(tmp_path):
     assert verify_package(archive)["release_version"] == "1.0.0"
 
 
-def test_verify_package_rejects_checksum_path_traversal(tmp_path):
-    package = _write_signed_package(tmp_path)
+def test_verify_package_rejects_modified_checksum_manifest_before_parsing(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
     digest = hashlib.sha256(b"outside").hexdigest()
     (package / "checksums.sha256").write_text(f"{digest}  ../outside\n", encoding="utf-8")
 
-    with pytest.raises(PackageValidationError, match="Unsafe package path"):
+    with pytest.raises(PackageValidationError, match="not signed by an enrolled SI release key"):
         verify_package(package)
 
 
+def test_verify_package_rejects_unchecksummed_additional_file(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
+    (package / "unexpected.txt").write_text("not signed", encoding="utf-8")
+
+    with pytest.raises(PackageValidationError, match="file set does not match"):
+        verify_package(package)
+
+
+def test_verify_package_never_trusts_a_key_supplied_by_the_package(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
+    enrolled_key = next((tmp_path / "trust" / "releases").glob("*.pem"))
+    package_key = package / "keys" / "cosign.pub"
+    package_key.parent.mkdir()
+    package_key.write_bytes(enrolled_key.read_bytes())
+    empty_trust = tmp_path / "government-trust"
+    empty_trust.mkdir()
+    monkeypatch.setenv("UNNEST_RELEASE_TRUST_DIR", str(empty_trust))
+
+    with pytest.raises(PackageValidationError, match="No trusted SI release key"):
+        verify_package(package)
+
+
+def test_verify_package_rejects_unsafe_archive_names(tmp_path):
+    archive = tmp_path / "release.tar"
+    with tarfile.open(archive, "w") as release:
+        info = tarfile.TarInfo("images\\runtime.tar")
+        info.size = 1
+        release.addfile(info, BytesIO(b"x"))
+
+    with pytest.raises(PackageValidationError, match="Unsafe release archive path"):
+        verify_package(archive)
+
+
+def test_trust_import_enrolls_key_by_spki_fingerprint(tmp_path):
+    public_key = tmp_path / "si-release.pub"
+    public_key.write_bytes(
+        Ed25519PrivateKey.generate()
+        .public_key()
+        .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    )
+    trust_directory = tmp_path / "trust"
+
+    result = CliRunner().invoke(
+        app,
+        ["trust", "import", str(public_key), "--trust-dir", str(trust_directory)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(list(trust_directory.glob("*.pem"))) == 1
+    assert "trusted SI release key sha256:" in result.output
+
+
 def test_preflight_rejects_non_linux_host(tmp_path, monkeypatch):
-    package = _write_signed_package(tmp_path)
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
     monkeypatch.setattr("langflow.unnestctl.platform.system", lambda: "Darwin")
 
     with pytest.raises(PackageValidationError, match="Only Linux"):
@@ -145,8 +212,8 @@ def test_preflight_port_probe_detects_a_bound_tcp_port():
     assert _tcp_port_available(port, "127.0.0.1") is True
 
 
-def test_acceptance_runs_signed_required_tests_and_sends_api_key(tmp_path):
-    package = _write_signed_package(tmp_path)
+def test_acceptance_runs_signed_required_tests_and_sends_api_key(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/health":
@@ -164,8 +231,8 @@ def test_acceptance_runs_signed_required_tests_and_sends_api_key(tmp_path):
     assert [result["passed"] for result in results] == [True, True]
 
 
-def test_acceptance_fails_when_required_response_does_not_match(tmp_path):
-    package = _write_signed_package(tmp_path)
+def test_acceptance_fails_when_required_response_does_not_match(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
     transport = httpx.MockTransport(lambda _request: httpx.Response(503))
 
     with pytest.raises(PackageValidationError, match="Required acceptance test failed: health"):

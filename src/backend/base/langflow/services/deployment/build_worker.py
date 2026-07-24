@@ -103,6 +103,7 @@ class BuildWorkerConfig:
     buildkit_key: Path
     runtime_base_image: str
     license_materials: Path
+    license_public_key: Path
     cosign_key: Path | None = None
     registry_credentials: Path | None = None
     forbidden_licenses: frozenset[str] = frozenset()
@@ -117,6 +118,7 @@ class BuildWorkerConfig:
             "buildkit_key": os.getenv("UNNEST_BUILDKIT_KEY"),
             "runtime_base_image": os.getenv("UNNEST_RUNTIME_BASE_IMAGE"),
             "license_materials": os.getenv("UNNEST_LICENSE_MATERIALS"),
+            "license_public_key": os.getenv("UNNEST_LICENSE_PUBLIC_KEY"),
         }
         if missing := [name for name, value in required.items() if not value]:
             msg = f"Build worker configuration is incomplete: {', '.join(missing)}"
@@ -133,6 +135,7 @@ class BuildWorkerConfig:
             buildkit_key=Path(str(required["buildkit_key"])),
             runtime_base_image=str(required["runtime_base_image"]),
             license_materials=Path(str(required["license_materials"])),
+            license_public_key=Path(str(required["license_public_key"])),
             cosign_key=Path(value) if (value := os.getenv("UNNEST_COSIGN_KEY")) else None,
             registry_credentials=(
                 Path(value).resolve() if (value := os.getenv("UNNEST_REGISTRY_CREDENTIALS")) else None
@@ -155,6 +158,7 @@ class BuildWorkerConfig:
             ("BuildKit certificate", self.buildkit_cert),
             ("BuildKit key", self.buildkit_key),
             ("license directory", self.license_materials),
+            ("vendor license public key", self.license_public_key),
         ):
             if (label == "license directory" and not path.is_dir()) or (
                 label != "license directory" and not path.is_file()
@@ -240,7 +244,7 @@ class DockerImageBuildWorker:
             self._write_json(release / "flows" / f"{flow.version_id}.json", flow.data)
 
         materials = context / "bundle"
-        for relative in ("license/license.json", "license/license.sig", "keys/license.pub"):
+        for relative in ("license/license.json", "license/license.sig"):
             source = self.config.license_materials / relative
             if not source.is_file() or source.is_symlink():
                 msg = f"Required signed license material is missing: {relative}"
@@ -248,7 +252,10 @@ class DockerImageBuildWorker:
             destination = materials / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
-        verify_license(materials, request.manifest)
+        vendor_key = materials / "trust" / "vendor-license.pem"
+        vendor_key.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(self.config.license_public_key, vendor_key)
+        verify_license(materials, request.manifest, self.config.license_public_key)
 
         (context / "Dockerfile").write_text(_DOCKERFILE, encoding="utf-8")
         for path in context.rglob("*"):

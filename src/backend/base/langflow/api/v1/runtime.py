@@ -1218,7 +1218,7 @@ async def runtime_setup_status(session: DbSessionReadOnly) -> dict[str, Any]:
         "branding": release.config.get("branding", {}) if release else {},
         "default_language": release.config.get("default_language", "ko") if release else "ko",
         "allow_language_switch": release.config.get("allow_language_switch", True) if release else True,
-        "license": runtime_license_status(release.version if release else None),
+        "license": runtime_license_status(str(release.manifest.get("release_digest") or "") if release else None),
         "required_secret_names": required_secrets if isinstance(required_secrets, list) else [],
         "configured_secret_names": sorted(
             configuration.settings.get("secret_names", []) if configuration else []
@@ -1236,7 +1236,7 @@ async def complete_runtime_setup(
     release = await _latest_runtime_release(session)
     if release is None:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Runtime release is unavailable")
-    license_status = runtime_license_status(release.version)
+    license_status = runtime_license_status(str(release.manifest.get("release_digest") or ""))
     if not license_status["valid"]:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -1325,7 +1325,7 @@ async def complete_runtime_setup(
 @router.get("/ready")
 async def ready(session: DbSessionReadOnly) -> dict[str, str]:
     release = await _release_for_api(session)
-    license_status = runtime_license_status(release.version)
+    license_status = runtime_license_status(str(release.manifest.get("release_digest") or ""))
     return {
         "status": "ok",
         "release_version": release.version,
@@ -1351,7 +1351,9 @@ async def runtime_metrics(session: DbSessionReadOnly) -> Response:
         if isinstance(value, int | float):
             QUEUE_VALUES.labels(name).set(value)
     SETUP_COMPLETE.set(int(await _setup_complete(session)))
-    LICENSE_VALID.set(int(runtime_license_status()["valid"]))
+    release = await _latest_runtime_release(session)
+    release_digest = str(release.manifest.get("release_digest") or "") if release else None
+    LICENSE_VALID.set(int(runtime_license_status(release_digest)["valid"]))
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -1625,7 +1627,6 @@ def _runtime_license_files() -> list[Path]:
     return [
         Path(os.getenv("UNNEST_LICENSE_FILE", "/opt/unnest/license/license.json")),
         Path(os.getenv("UNNEST_LICENSE_SIGNATURE", "/opt/unnest/license/license.sig")),
-        Path(os.getenv("UNNEST_LICENSE_PUBLIC_KEY", "/opt/unnest/keys/license.pub")),
     ]
 
 
@@ -1794,7 +1795,7 @@ async def get_runtime_license(
     _admin: Annotated[User, Depends(get_current_active_superuser)],
 ) -> dict[str, Any]:
     release = await _release_for_api(session)
-    return runtime_license_status(release.version)
+    return runtime_license_status(str(release.manifest.get("release_digest") or ""))
 
 
 @router.get("/api/v1/admin/schedules")

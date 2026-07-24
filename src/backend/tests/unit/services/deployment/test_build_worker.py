@@ -24,29 +24,30 @@ def test_release_uses_configured_pinned_base_image(monkeypatch):
     assert OnPremDeploymentConfig().base_image_digest == digest
 
 
-def _license_materials(root: Path, release_version: str) -> Path:
+def _license_materials(root: Path, release_digest: str) -> tuple[Path, Path]:
     private_key = Ed25519PrivateKey.generate()
     license_blob = json.dumps(
         {
             "expires_at": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
-            "release_versions": [release_version],
+            "release_digest": release_digest,
         },
         separators=(",", ":"),
     ).encode()
-    for relative in ("license/license.json", "license/license.sig", "keys/license.pub"):
+    for relative in ("license/license.json", "license/license.sig"):
         (root / relative).parent.mkdir(parents=True, exist_ok=True)
     (root / "license/license.json").write_bytes(license_blob)
     (root / "license/license.sig").write_text(
         base64.b64encode(private_key.sign(license_blob)).decode(),
         encoding="utf-8",
     )
-    (root / "keys/license.pub").write_bytes(
+    public_key = root / "vendor-license.pem"
+    public_key.write_bytes(
         private_key.public_key().public_bytes(
             serialization.Encoding.PEM,
             serialization.PublicFormat.SubjectPublicKeyInfo,
         )
     )
-    return root
+    return root, public_key
 
 
 def _request(build_id, base_digest: str) -> BuildRequest:
@@ -107,6 +108,11 @@ def _request(build_id, base_digest: str) -> BuildRequest:
 
 def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
     digest = f"sha256:{'a' * 64}"
+    first_request = _request(uuid4(), digest)
+    license_materials, license_public_key = _license_materials(
+        tmp_path / "materials",
+        first_request.manifest["release_digest"],
+    )
     tls = tmp_path / "tls"
     tls.mkdir()
     for name in ("ca.pem", "cert.pem", "key.pem"):
@@ -118,7 +124,8 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
         buildkit_cert=tls / "cert.pem",
         buildkit_key=tls / "key.pem",
         runtime_base_image=f"registry.internal/unnest-runtime@{digest}",
-        license_materials=_license_materials(tmp_path / "materials", "1.2.3"),
+        license_materials=license_materials,
+        license_public_key=license_public_key,
     )
     worker = DockerImageBuildWorker(config)
     commands: list[list[str]] = []
@@ -141,7 +148,6 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
         return ""
 
     monkeypatch.setattr(worker, "_run", fake_run)
-    first_request = _request(uuid4(), digest)
     worker.submit(first_request)
     worker.run(str(first_request.build_id))
     first = worker._status(str(first_request.build_id))

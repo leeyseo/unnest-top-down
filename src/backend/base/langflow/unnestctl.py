@@ -26,26 +26,52 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
 
+from langflow.services.deployment.offline_package import (
+    CHECKSUM_FILE,
+    CHECKSUM_SIGNATURE_FILE,
+    sha256_file,
+)
 from langflow.services.runtime_backup import RuntimeBackupError, restore_runtime_backup
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
+trust_app = typer.Typer(no_args_is_help=True)
+app.add_typer(trust_app, name="trust")
 SUPPORTED_ARCHITECTURES = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
 SHA256_HEX_LENGTH = 64
 MAX_ACCEPTANCE_TESTS = 100
 MIN_HTTP_STATUS = 100
 MAX_HTTP_STATUS = 599
 MAX_TCP_PORT = 65535
+MAX_ARCHIVE_MEMBERS = 10_000
+MAX_ARCHIVE_FILE_SIZE = 100 * 1024**3
+MAX_ARCHIVE_TOTAL_SIZE = 500 * 1024**3
+MAX_SIGNED_METADATA_SIZE = 16 * 1024**2
+PACKAGE_LAYOUT_VERSION = 2
+ASCII_CONTROL_END = 32
+ASCII_DELETE = 127
+_UNSIGNED_PACKAGE_FILES = frozenset({CHECKSUM_FILE, CHECKSUM_SIGNATURE_FILE})
 
 
 class PackageValidationError(ValueError):
     pass
 
 
+def _has_unsafe_path_characters(value: str) -> bool:
+    return "\\" in value or any(
+        ord(character) < ASCII_CONTROL_END or ord(character) == ASCII_DELETE for character in value
+    )
+
+
 def _package_file(root: Path, relative: str) -> Path:
-    if not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+    if (
+        not relative
+        or _has_unsafe_path_characters(relative)
+        or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+    ):
         raise PackageValidationError(f"Unsafe package path: {relative}")
     path = root / relative
     if path.is_symlink() or root.resolve() not in path.resolve().parents:
@@ -58,9 +84,25 @@ def _extract_package_archive(archive_path: Path, destination: Path) -> None:
     try:
         with tarfile.open(archive_path, mode="r:") as archive:
             seen: set[Path] = set()
-            for member in archive.getmembers():
+            total_size = 0
+            for member_number, member in enumerate(archive, start=1):
+                if member_number > MAX_ARCHIVE_MEMBERS:
+                    raise PackageValidationError("Release archive contains too many entries")
+                if member.size > MAX_ARCHIVE_FILE_SIZE:
+                    raise PackageValidationError(f"Release archive entry is too large: {member.name}")
+                total_size += member.size
+                if total_size > MAX_ARCHIVE_TOTAL_SIZE:
+                    raise PackageValidationError("Release archive is too large")
+                if getattr(member, "sparse", None) or any(key.startswith("GNU.sparse") for key in member.pax_headers):
+                    raise PackageValidationError(f"Sparse release archive entry is unsupported: {member.name}")
                 relative = Path(member.name)
-                if relative.is_absolute() or not member.name or ".." in relative.parts:
+                if (
+                    relative.is_absolute()
+                    or not member.name
+                    or member.name in {".", "./"}
+                    or _has_unsafe_path_characters(member.name)
+                    or ".." in relative.parts
+                ):
                     raise PackageValidationError(f"Unsafe release archive path: {member.name}")
                 if member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
                     raise PackageValidationError(f"Unsupported release archive entry: {member.name}")
@@ -77,6 +119,8 @@ def _extract_package_archive(archive_path: Path, destination: Path) -> None:
                     raise PackageValidationError(f"Release archive entry cannot be read: {member.name}")
                 with source, target.open("xb") as destination_file:
                     shutil.copyfileobj(source, destination_file)
+                if target.stat().st_size != member.size:
+                    raise PackageValidationError(f"Release archive entry is truncated: {member.name}")
     except (OSError, tarfile.TarError) as exc:
         raise PackageValidationError("Release archive is missing or invalid") from exc
 
@@ -107,11 +151,25 @@ def load_manifest(package: Path) -> dict[str, Any]:
     return value
 
 
+def _package_regular_files(package: Path) -> set[str]:
+    files: set[str] = set()
+    for path in package.rglob("*"):
+        relative = path.relative_to(package).as_posix()
+        mode = path.lstat().st_mode
+        if path.is_symlink() or not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
+            raise PackageValidationError(f"Unsupported package entry: {relative}")
+        if stat.S_ISREG(mode):
+            files.add(relative)
+    return files
+
+
 def verify_checksums(package: Path) -> set[str]:
-    checksum_path = package / "checksums.sha256"
+    checksum_path = package / CHECKSUM_FILE
     try:
+        if checksum_path.stat().st_size > MAX_SIGNED_METADATA_SIZE:
+            raise PackageValidationError("checksums.sha256 is too large")
         lines = checksum_path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise PackageValidationError("checksums.sha256 is missing") from exc
     if not lines:
         raise PackageValidationError("checksums.sha256 is empty")
@@ -122,21 +180,69 @@ def verify_checksums(package: Path) -> set[str]:
         except ValueError as exc:
             raise PackageValidationError("Invalid checksum entry") from exc
         relative = relative.removeprefix("*")
+        if relative in _UNSIGNED_PACKAGE_FILES:
+            raise PackageValidationError(f"Checksum entry is not allowed: {relative}")
+        if relative in checked:
+            raise PackageValidationError(f"Duplicate checksum entry: {relative}")
         if len(digest) != SHA256_HEX_LENGTH or any(character not in "0123456789abcdef" for character in digest):
             raise PackageValidationError(f"Invalid SHA-256 digest for {relative}")
         path = _package_file(package, relative)
         if not path.is_file():
             raise PackageValidationError(f"Checksummed file is missing: {relative}")
-        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        if sha256_file(path) != digest:
             raise PackageValidationError(f"Checksum mismatch: {relative}")
         checked.add(relative)
+    expected = _package_regular_files(package).difference(_UNSIGNED_PACKAGE_FILES)
+    if checked != expected:
+        missing = sorted(expected.difference(checked))
+        unexpected = sorted(checked.difference(expected))
+        detail = f"missing={missing}, unexpected={unexpected}"
+        raise PackageValidationError(f"Checksum file set does not match package files: {detail}")
     return checked
 
 
-def _verify_blob_signature(public_key_path: Path, signature_path: Path, blob: bytes) -> None:
+def _public_key_fingerprint(public_key_blob: bytes) -> str:
     try:
-        public_key = serialization.load_pem_public_key(public_key_path.read_bytes())
-        signature = base64.b64decode(signature_path.read_text(encoding="utf-8").strip(), validate=True)
+        public_key = serialization.load_pem_public_key(public_key_blob)
+        if not isinstance(
+            public_key,
+            (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey, ec.EllipticCurvePublicKey, rsa.RSAPublicKey),
+        ):
+            raise TypeError
+        der = public_key.public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    except (ValueError, TypeError) as exc:
+        raise PackageValidationError("Trusted public key is invalid") from exc
+    return f"sha256:{hashlib.sha256(der).hexdigest()}"
+
+
+def enroll_release_key(public_key_path: Path, trust_directory: Path) -> str:
+    """Enroll an SI release public key under its SPKI SHA-256 fingerprint."""
+    if public_key_path.is_symlink() or not public_key_path.is_file():
+        raise PackageValidationError("SI release public key is missing or invalid")
+    key_blob = _read_limited(public_key_path, label="SI release public key")
+    fingerprint = _public_key_fingerprint(key_blob)
+    trust_directory.mkdir(parents=True, exist_ok=True)
+    destination = trust_directory / f"{fingerprint.removeprefix('sha256:')}.pem"
+    if destination.exists():
+        if destination.is_symlink() or _public_key_fingerprint(destination.read_bytes()) != fingerprint:
+            raise PackageValidationError("Trusted SI release key destination is invalid")
+        return fingerprint
+    try:
+        with destination.open("xb") as enrolled:
+            enrolled.write(key_blob)
+        destination.chmod(0o644)
+    except OSError as exc:
+        raise PackageValidationError("SI release public key could not be enrolled") from exc
+    return fingerprint
+
+
+def _verify_blob_signature(public_key_blob: bytes, signature_blob: bytes, blob: bytes) -> None:
+    try:
+        public_key = serialization.load_pem_public_key(public_key_blob)
+        signature = base64.b64decode(signature_blob.strip(), validate=True)
         if isinstance(public_key, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
             public_key.verify(signature, blob)
         elif isinstance(public_key, ec.EllipticCurvePublicKey):
@@ -145,38 +251,86 @@ def _verify_blob_signature(public_key_path: Path, signature_path: Path, blob: by
             public_key.verify(signature, blob, padding.PKCS1v15(), hashes.SHA256())
         else:
             raise TypeError
-    except (OSError, InvalidSignature, ValueError, TypeError) as exc:
-        raise PackageValidationError(f"Signature verification failed: {signature_path.name}") from exc
+    except (InvalidSignature, ValueError, TypeError) as exc:
+        raise PackageValidationError("Signature verification failed") from exc
 
 
-def verify_license(package: Path, manifest: dict[str, Any]) -> None:
-    license_path = package / "license" / "license.json"
+def _read_limited(path: Path, *, label: str) -> bytes:
     try:
-        license_blob = license_path.read_bytes()
+        if path.stat().st_size > MAX_SIGNED_METADATA_SIZE:
+            raise PackageValidationError(f"{label} is too large")
+        return path.read_bytes()
     except OSError as exc:
-        raise PackageValidationError("Offline license is missing") from exc
-    _verify_blob_signature(
-        package / "keys" / "license.pub",
-        package / "license" / "license.sig",
-        license_blob,
-    )
+        raise PackageValidationError(f"{label} is missing") from exc
+
+
+def _verify_release_signature(package: Path, trust_directory: Path) -> str:
+    checksums = _read_limited(package / CHECKSUM_FILE, label=CHECKSUM_FILE)
+    signature = _read_limited(package / CHECKSUM_SIGNATURE_FILE, label=CHECKSUM_SIGNATURE_FILE)
     try:
-        license_data = json.loads(license_path.read_text(encoding="utf-8"))
+        candidates = sorted(trust_directory.glob("*.pem"))
+    except OSError as exc:
+        raise PackageValidationError("Release trust directory is unavailable") from exc
+    if not candidates:
+        raise PackageValidationError("No trusted SI release key is enrolled")
+    for candidate in candidates:
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        try:
+            key_blob = candidate.read_bytes()
+            fingerprint = _public_key_fingerprint(key_blob)
+            if candidate.name != f"{fingerprint.removeprefix('sha256:')}.pem":
+                continue
+            _verify_blob_signature(key_blob, signature, checksums)
+        except PackageValidationError:
+            continue
+        return fingerprint
+    raise PackageValidationError("Package is not signed by an enrolled SI release key")
+
+
+def verify_license(package: Path, manifest: dict[str, Any], public_key_path: Path) -> None:
+    license_path = package / "license" / "license.json"
+    license_blob = _read_limited(license_path, label="Offline license")
+    public_key_blob = _read_limited(public_key_path, label="Trusted vendor license public key")
+    signature_blob = _read_limited(package / "license" / "license.sig", label="Offline license signature")
+    _verify_blob_signature(public_key_blob, signature_blob, license_blob)
+    try:
+        license_data = json.loads(license_blob)
         expires_at = datetime.fromisoformat(str(license_data["expires_at"]).replace("Z", "+00:00"))
-    except (OSError, KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
+    except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise PackageValidationError("Offline license is invalid") from exc
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     if expires_at <= datetime.now(timezone.utc):
         raise PackageValidationError("Offline license has expired")
-    release_versions = license_data.get("release_versions", [])
-    if release_versions and manifest.get("release_version") not in release_versions:
-        raise PackageValidationError("Offline license does not permit this release")
+    if license_data.get("release_digest") != manifest.get("release_digest"):
+        raise PackageValidationError("Offline license does not permit this exact release")
 
 
-def _verify_package_directory(package: Path) -> dict[str, Any]:
+def _verify_package_directory(
+    package: Path,
+    *,
+    release_trust_directory: Path | None = None,
+    license_public_key: Path | None = None,
+) -> dict[str, Any]:
     package = package.resolve()
+    trust_directory = release_trust_directory or Path(
+        os.getenv("UNNEST_RELEASE_TRUST_DIR", "/etc/unnest/trust/releases")
+    )
+    vendor_key = license_public_key or Path(
+        os.getenv("UNNEST_LICENSE_PUBLIC_KEY", "/etc/unnest/trust/vendor-license.pem")
+    )
+    signer_fingerprint = _verify_release_signature(package, trust_directory)
+    checked = verify_checksums(package)
     manifest = load_manifest(package)
+    if manifest.get("package", {}).get("layout_version") != PACKAGE_LAYOUT_VERSION:
+        raise PackageValidationError("Unsupported release package layout")
+    if manifest.get("build", {}).get("signing_enabled") is not True:
+        raise PackageValidationError("Release signing is mandatory")
+    if manifest.get("build", {}).get("signer_fingerprint") != signer_fingerprint:
+        raise PackageValidationError("Release signer fingerprint does not match the trusted signature")
+    if package.joinpath("keys/cosign.pub").exists() or package.joinpath("keys/license.pub").exists():
+        raise PackageValidationError("Package must not supply its own trust keys")
     contract = manifest.get("package", {})
     required_paths: set[str] = set()
     for relative in contract.get("required_files", []):
@@ -191,21 +345,8 @@ def _verify_package_directory(package: Path) -> dict[str, Any]:
         if not validated_matches:
             raise PackageValidationError(f"Required package content is missing: {pattern}")
         required_paths.update(str(path.relative_to(package)) for path in validated_matches)
-    checked = verify_checksums(package)
     if missing_checksums := sorted(required_paths.difference(checked)):
         raise PackageValidationError(f"Required files are not checksummed: {', '.join(missing_checksums)}")
-    manifest_path = package / "manifest" / "release.json"
-    if manifest.get("build", {}).get("signing_enabled") is True:
-        _verify_blob_signature(
-            package / "keys" / "cosign.pub",
-            package / "signatures" / "release-manifest.sig",
-            manifest_path.read_bytes(),
-        )
-        _verify_blob_signature(
-            package / "keys" / "cosign.pub",
-            package / "signatures" / "checksums.sig",
-            (package / "checksums.sha256").read_bytes(),
-        )
     acceptance_path = package / "tests" / "acceptance.json"
     try:
         acceptance_tests = json.loads(acceptance_path.read_text(encoding="utf-8"))
@@ -215,14 +356,23 @@ def _verify_package_directory(package: Path) -> dict[str, Any]:
         raise PackageValidationError("Acceptance tests must be a non-empty list of at most 100 tests")
     if acceptance_tests != manifest.get("acceptance_tests"):
         raise PackageValidationError("Acceptance tests do not match the signed release manifest")
-    verify_license(package, manifest)
+    verify_license(package, manifest, vendor_key)
     return manifest
 
 
-def verify_package(package: Path) -> dict[str, Any]:
+def verify_package(
+    package: Path,
+    *,
+    release_trust_directory: Path | None = None,
+    license_public_key: Path | None = None,
+) -> dict[str, Any]:
     """Verify an unpacked release directory or a tar release archive."""
     with _materialize_package(package) as root:
-        return _verify_package_directory(root)
+        return _verify_package_directory(
+            root,
+            release_trust_directory=release_trust_directory,
+            license_public_key=license_public_key,
+        )
 
 
 def _available_memory() -> int:
@@ -440,6 +590,19 @@ def run_acceptance(
             ca=ca,
             transport=transport,
         )
+
+
+@trust_app.command("import")
+def import_release_key(
+    public_key: Path = typer.Argument(..., exists=True, dir_okay=False),
+    trust_directory: Path = typer.Option(
+        Path("/etc/unnest/trust/releases"),
+        "--trust-dir",
+        envvar="UNNEST_RELEASE_TRUST_DIR",
+    ),
+) -> None:
+    fingerprint = enroll_release_key(public_key, trust_directory)
+    typer.echo(f"trusted SI release key {fingerprint}")
 
 
 @app.command()
