@@ -785,8 +785,6 @@ async def analyze_release(
         errors.extend(_merge_declared_dependencies(dependency_lock, flow_declared_dependencies))
         sandbox = sandbox or flow_sandbox
 
-    if dependency_lock["python_packages"]:
-        errors.append("Custom Python dependency wheels are not yet available in the offline package")
     if dependency_lock["os_packages"] or dependency_lock["binaries"]:
         errors.append("Offline MVP does not support OS package or external binary dependencies")
     if sandbox:
@@ -866,7 +864,7 @@ async def analyze_release(
         "build": {
             "architecture": config.architecture,
             "base_image_digest": config.base_image_digest,
-            "dependency_lock_status": "worker-resolution-required",
+            "dependency_lock_status": "declared-hashes",
             "declared_dependency_count": sum(len(values) for values in dependency_lock.values()),
             "sbom_required": True,
             "checksums_required": True,
@@ -885,6 +883,7 @@ async def analyze_release(
                 "license/license.sig",
                 "compose/compose.yml",
                 "signatures/checksums.sig",
+                "wheels/requirements.lock",
             ],
             "required_globs": ["flows/*.json", "images/*.tar"],
         },

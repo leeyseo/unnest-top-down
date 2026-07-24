@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from langflow.services.deployment.buildkit import WorkerArtifact, WorkerBuildStatus
 from langflow.services.deployment.manifest import canonical_digest
+from langflow.services.deployment.offline_dependencies import stage_locked_wheels, validated_dependency_lock
 from langflow.services.deployment.offline_package import create_reproducible_tar, sha256_file, write_checksums
 from langflow.unnestctl import public_key_fingerprint, verify_license, verify_package
 
@@ -33,7 +34,12 @@ USER 0
 COPY --chown=1000:0 bundle /opt/unnest
 ENV UNNEST_RELEASE_BUNDLE=/opt/unnest/release
 ENV DO_NOT_TRACK=true LANGFLOW_DO_NOT_TRACK=true
-RUN python -c "import langflow,pathlib; \
+RUN if [ -s /opt/unnest/release/wheels/requirements.lock ]; then \
+      uv pip install --system --no-index \
+        --find-links=/opt/unnest/release/wheels \
+        --require-hashes \
+        -r /opt/unnest/release/wheels/requirements.lock; \
+    fi && python -c "import langflow,pathlib; \
 p=pathlib.Path(langflow.__file__).parent/'frontend/.unnest-runtime-profile'; assert p.is_file()"
 USER 1000
 CMD ["uvicorn","langflow.main:create_runtime_app","--factory","--host","0.0.0.0","--port","7860"]
@@ -182,6 +188,7 @@ class BuildRequest(BaseModel):
         if self.manifest.get("sandbox", {}).get("required"):
             msg = "Risky Flow export requires the sandbox worker, which is not available"
             raise ValueError(msg)
+        validated_dependency_lock(self.manifest)
         return self
 
 
@@ -217,6 +224,7 @@ class BuildWorkerConfig:
     redis_image: str
     cosign_key: Path
     cosign_public_key: Path
+    wheelhouse: Path | None = None
     registry_credentials: Path | None = None
     forbidden_licenses: frozenset[str] = frozenset()
 
@@ -258,6 +266,9 @@ class BuildWorkerConfig:
             redis_image=str(required["redis_image"]),
             cosign_key=Path(str(required["cosign_key"])),
             cosign_public_key=Path(str(required["cosign_public_key"])),
+            wheelhouse=(
+                Path(value).resolve() if (value := os.getenv("UNNEST_OFFLINE_WHEELHOUSE")) else None
+            ),
             registry_credentials=(
                 Path(value).resolve() if (value := os.getenv("UNNEST_REGISTRY_CREDENTIALS")) else None
             ),
@@ -300,6 +311,11 @@ class BuildWorkerConfig:
                 raise ValueError(msg)
         _image_tag(self.postgres_image)
         _image_tag(self.redis_image)
+        if self.wheelhouse is not None and (
+            not self.wheelhouse.is_dir() or self.wheelhouse.is_symlink()
+        ):
+            msg = f"Offline wheelhouse is invalid: {self.wheelhouse}"
+            raise ValueError(msg)
         for name in ("postgresql.tar", "redis.tar"):
             image = self.support_images / name
             if not image.is_file() or image.is_symlink():
@@ -374,10 +390,12 @@ class DockerImageBuildWorker:
     def _prepare_context(self, job: Path, request: BuildRequest) -> Path:
         context = job / "context"
         release = context / "bundle" / "release"
+        stage_locked_wheels(self.config.wheelhouse, job / "locked-wheels", request.manifest)
         self._write_json(release / "manifest" / "release.json", request.manifest)
         self._write_json(release / "openapi" / "openapi.json", request.manifest["api"]["openapi"])
         for flow in request.flows:
             self._write_json(release / "flows" / f"{flow.version_id}.json", flow.data)
+        shutil.copytree(job / "locked-wheels", release / "wheels")
 
         materials = context / "bundle"
         for relative in ("license/license.json", "license/license.sig"):
@@ -394,9 +412,15 @@ class DockerImageBuildWorker:
         verify_license(materials, request.manifest, self.config.license_public_key)
 
         (context / "Dockerfile").write_text(_DOCKERFILE, encoding="utf-8")
-        for path in context.rglob("*"):
+        context.chmod(0o755)
+        for path in sorted(context.rglob("*")):
             if path.is_file():
+                path.chmod(0o644)
                 os.utime(path, (0, 0))
+            elif path.is_dir():
+                path.chmod(0o755)
+                os.utime(path, (0, 0))
+        os.utime(context, (0, 0))
         return context
 
     def _scan_findings(self, report: dict[str, Any]) -> list[str]:
@@ -515,6 +539,7 @@ class DockerImageBuildWorker:
         self._write_json(package / "tests" / "acceptance.json", manifest["acceptance_tests"])
         for flow in request.flows:
             self._write_json(package / "flows" / f"{flow.version_id}.json", flow.data)
+        shutil.copytree(job / "locked-wheels", package / "wheels")
 
         compose = _COMPOSE_TEMPLATE.format(
             postgres_image=_image_tag(self.config.postgres_image),

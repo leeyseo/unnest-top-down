@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import tarfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from langflow.api.v1.schemas.on_prem_deployments import OnPremDeploymentConfig
@@ -16,6 +18,7 @@ from langflow.services.deployment.build_worker import (
     DockerImageBuildWorker,
 )
 from langflow.services.deployment.manifest import canonical_digest
+from langflow.services.deployment.offline_dependencies import DependencyLockError, stage_locked_wheels
 
 
 def test_release_uses_configured_pinned_base_image(monkeypatch):
@@ -23,6 +26,16 @@ def test_release_uses_configured_pinned_base_image(monkeypatch):
     monkeypatch.setenv("UNNEST_RUNTIME_BASE_IMAGE", f"registry.internal/unnest-runtime@{digest}")
 
     assert OnPremDeploymentConfig().base_image_digest == digest
+
+
+def test_build_request_rejects_dependency_lock_not_declared_by_flows():
+    request = _request(uuid4(), f"sha256:{'a' * 64}").model_dump(mode="json")
+    request["manifest"]["dependency_lock"]["python_packages"] = [
+        {"name": "undeclared", "version": "1.0.0", "hashes": [f"sha256:{'b' * 64}"]}
+    ]
+
+    with pytest.raises(ValueError, match="does not match the immutable Flow declarations"):
+        BuildRequest.model_validate(request)
 
 
 def _license_materials(root: Path, release_digest: str) -> tuple[Path, Path]:
@@ -63,6 +76,7 @@ def _request(build_id, base_digest: str) -> BuildRequest:
             "version_number": 1,
             "digest": canonical_digest(agent),
             "role": "agent",
+            "declared_dependencies": {"python_packages": [], "os_packages": [], "binaries": []},
         },
         {
             "id": str(ingestion_id),
@@ -70,6 +84,7 @@ def _request(build_id, base_digest: str) -> BuildRequest:
             "version_number": 1,
             "digest": canonical_digest(ingestion),
             "role": "ingestion",
+            "declared_dependencies": {"python_packages": [], "os_packages": [], "binaries": []},
         },
     ]
     manifest = {
@@ -103,6 +118,7 @@ def _request(build_id, base_digest: str) -> BuildRequest:
             }
         ],
         "knowledge_base_alias": "shared",
+        "dependency_lock": {"python_packages": [], "os_packages": [], "binaries": []},
         "sandbox": {"required": False},
         "package": {
             "layout_version": 2,
@@ -136,6 +152,18 @@ def _request(build_id, base_digest: str) -> BuildRequest:
 def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
     digest = f"sha256:{'a' * 64}"
     first_request = _request(uuid4(), digest)
+    wheelhouse = tmp_path / "wheelhouse"
+    wheelhouse.mkdir()
+    wheel = wheelhouse / "agency_sdk-1.2.3-py3-none-any.whl"
+    wheel.write_bytes(b"locked offline wheel")
+    wheel_digest = f"sha256:{hashlib.sha256(wheel.read_bytes()).hexdigest()}"
+    dependency_lock = {
+        "python_packages": [{"name": "agency-sdk", "version": "1.2.3", "hashes": [wheel_digest]}],
+        "os_packages": [],
+        "binaries": [],
+    }
+    first_request.manifest["dependency_lock"] = dependency_lock
+    first_request.manifest["flows"][0]["declared_dependencies"] = dependency_lock
     license_materials, license_public_key = _license_materials(
         tmp_path / "materials",
         first_request.manifest["release_digest"],
@@ -172,6 +200,7 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
         redis_image=f"docker.io/library/redis:7@sha256:{'d' * 64}",
         cosign_key=cosign_key,
         cosign_public_key=cosign_public_key,
+        wheelhouse=wheelhouse,
     )
     worker = DockerImageBuildWorker(config)
     commands: list[list[str]] = []
@@ -215,9 +244,14 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
     assert first.artifacts[0].artifact_type == "package"
     assert first.artifacts[0].digest == second.artifacts[0].digest
     with tarfile.open(worker.artifact(str(first_request.build_id)), "r:") as package:
-        assert {"manifest/release.json", "compose/compose.yml", "signatures/checksums.sig"}.issubset(
-            package.getnames()
-        )
+        names = set(package.getnames())
+        assert {
+            "manifest/release.json",
+            "compose/compose.yml",
+            "signatures/checksums.sig",
+            "wheels/agency_sdk-1.2.3-py3-none-any.whl",
+            "wheels/requirements.lock",
+        }.issubset(names)
     assert [command[0] for command in commands].count("buildctl") == 2
     assert [command[0] for command in commands].count("trivy") == 12
     assert [command[0] for command in commands].count("cosign") == 2
@@ -225,3 +259,14 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
     assert worker._scan_findings(
         {"Results": [{"Secrets": [{"Severity": "HIGH", "RuleID": "embedded-api-key"}]}]}
     ) == ["secret:embedded-api-key"]
+
+    missing_request = first_request.model_copy(deep=True)
+    missing_hash = f"sha256:{'e' * 64}"
+    missing_request.manifest["dependency_lock"]["python_packages"][0]["hashes"] = [missing_hash]
+    missing_request.manifest["flows"][0]["declared_dependencies"]["python_packages"][0]["hashes"] = [
+        missing_hash
+    ]
+    missing_job = tmp_path / "missing-wheel-job"
+    missing_job.mkdir()
+    with pytest.raises(DependencyLockError, match="does not satisfy the complete lock"):
+        stage_locked_wheels(config.wheelhouse, missing_job / "locked-wheels", missing_request.manifest)

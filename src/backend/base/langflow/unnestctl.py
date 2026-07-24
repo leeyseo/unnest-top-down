@@ -31,6 +31,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
 from cryptography.x509.oid import NameOID
 
+from langflow.services.deployment.offline_dependencies import DependencyLockError, verify_locked_wheels
 from langflow.services.deployment.offline_package import (
     CHECKSUM_FILE,
     CHECKSUM_SIGNATURE_FILE,
@@ -73,6 +74,7 @@ _REQUIRED_LAYOUT_FILES = frozenset(
         "tests/acceptance.json",
         "license/license.json",
         "license/license.sig",
+        "wheels/requirements.lock",
         CHECKSUM_SIGNATURE_FILE,
     }
 )
@@ -419,6 +421,11 @@ def _validate_layout(package: Path, manifest: dict[str, Any], checked: set[str])
     actual_flow_files = {path.relative_to(package).as_posix() for path in (package / "flows").glob("*.json")}
     if actual_flow_files != expected_flow_files:
         raise PackageValidationError("Bundled Flow Version files do not exactly match the release manifest")
+
+    try:
+        verify_locked_wheels(package, manifest)
+    except DependencyLockError as exc:
+        raise PackageValidationError(str(exc)) from exc
 
 
 def _verify_package_directory(

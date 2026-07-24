@@ -71,6 +71,7 @@ def _write_signed_package(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "openapi/openapi.json": b'{"openapi":"3.1.0"}',
         "reports/sbom.cdx.json": b'{"bomFormat":"CycloneDX"}',
         "reports/trivy.json": b'{"critical_findings":[]}',
+        "wheels/requirements.lock": b"",
         "tests/acceptance.json": json.dumps(
             [
                 {
@@ -94,7 +95,12 @@ def _write_signed_package(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "provider": "unnest-on-prem",
         "release_version": "1.0.0",
         "release_digest": release_digest,
-        "build": {"signing_enabled": True, "signer_fingerprint": f"sha256:{signer_fingerprint}"},
+        "build": {
+            "signing_enabled": True,
+            "signer_fingerprint": f"sha256:{signer_fingerprint}",
+            "dependency_lock_status": "resolved",
+            "resolved_wheels": [],
+        },
         "deployment": {
             "architecture": "amd64",
             "orchestrator": "compose",
@@ -132,6 +138,7 @@ def _write_signed_package(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         ],
         "sandbox": {"required": False},
         "external_endpoints": [],
+        "dependency_lock": {"python_packages": [], "os_packages": [], "binaries": []},
         "acceptance_tests": json.loads(files["tests/acceptance.json"]),
         "package": {
             "layout_version": 2,

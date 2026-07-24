@@ -12,9 +12,9 @@ government administrator installs the resulting release on an internet-isolated
 server, completes setup in a browser, and runs both safe and sandboxed flows
 without transferring runtime data to the SI network.
 
-The current layout-v2 checkpoint implements the signed safe-Flow package and
-installer. It deliberately blocks risky Flows, custom Python dependencies, and
-bundled source documents until the later sandbox and dependency/document
+The current layout-v2 checkpoint implements the signed safe-Flow package,
+installer, and hash-locked Python wheel bundle. It deliberately blocks risky
+Flows and bundled source documents until the later sandbox and document
 checkpoints are implemented. Those blocked features remain part of this final
 definition of done.
 
@@ -79,6 +79,8 @@ unnest-<release>-rocky9-amd64.tar
 ├── openapi/openapi.json
 ├── compose/compose.yml
 ├── flows/<flow-version-id>.json
+├── wheels/requirements.lock
+├── wheels/<locked-package>.whl
 ├── images/unnest-runtime.tar
 ├── images/postgresql.tar
 ├── images/redis.tar
@@ -124,10 +126,13 @@ External telemetry is disabled in the image.
 
 ## Custom Python dependencies
 
-Custom Components may declare Python packages only. Every package must resolve
-to an exact version and wheel hash during export. The Build Worker downloads the
-wheels from approved sources, stores them under `dependencies/python/`, and
-installs the same locked wheels into the relevant runtime image.
+Components may declare Python packages only. Every package must have an exact
+version and one or more wheel hashes in the immutable Flow declaration. The
+Build Worker never downloads packages: it resolves every declared hash from the
+operator-provisioned `UNNEST_OFFLINE_WHEELHOUSE`, writes a hash-locked
+`wheels/requirements.lock`, and installs those same wheels into the Runtime
+image with the package index disabled. The package verifier independently
+checks the Flow declarations, manifest lock, wheel filenames, and wheel hashes.
 
 Export is blocked when a Custom Component requires:
 
