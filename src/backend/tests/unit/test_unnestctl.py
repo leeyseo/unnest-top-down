@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import os
 import socket
 import sqlite3
 import stat
@@ -13,6 +14,7 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.x509.oid import ExtendedKeyUsageOID
 from langflow.services.deployment.offline_package import create_reproducible_tar, write_checksums
 from langflow.services.runtime_backup import RuntimeBackupFile, create_runtime_backup
 from langflow.services.runtime_setup import generate_age_recovery_key
@@ -309,7 +311,21 @@ def test_install_loads_verified_images_and_starts_persistent_compose(tmp_path, m
     release_directory = install_root / "releases" / "1.0.0"
     assert (release_directory / "compose.yml").is_file()
     assert stat.S_IMODE((release_directory / ".env").stat().st_mode) == 0o600
+    assert f"UNNEST_INSTALL_GID={os.getegid()}" in (release_directory / ".env").read_text()
     assert x509.load_pem_x509_certificate((release_directory / "tls" / "server.crt").read_bytes())
+    runtime_tls = release_directory / "sandbox-tls" / "runtime"
+    worker_tls = release_directory / "sandbox-tls" / "worker"
+    client_certificate = x509.load_pem_x509_certificate((runtime_tls / "client.crt").read_bytes())
+    server_certificate = x509.load_pem_x509_certificate((worker_tls / "server.crt").read_bytes())
+    assert ExtendedKeyUsageOID.CLIENT_AUTH in client_certificate.extensions.get_extension_for_class(
+        x509.ExtendedKeyUsage
+    ).value
+    assert ExtendedKeyUsageOID.SERVER_AUTH in server_certificate.extensions.get_extension_for_class(
+        x509.ExtendedKeyUsage
+    ).value
+    assert (runtime_tls / "client.key").read_bytes() != (worker_tls / "server.key").read_bytes()
+    assert stat.S_IMODE((runtime_tls / "client.key").stat().st_mode) == 0o640
+    assert stat.S_IMODE((worker_tls / "server.key").stat().st_mode) == 0o640
     assert json.loads((install_root / "current.json").read_text())["url"] == "https://127.0.0.1:7860/setup"
 
 

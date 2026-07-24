@@ -1,4 +1,5 @@
 import stat
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4, uuid5
@@ -6,7 +7,13 @@ from uuid import UUID, uuid4, uuid5
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 from langflow.api.v1 import runtime as runtime_module
-from langflow.api.v1.runtime import RuntimeSetupRequest, _setup_complete, complete_runtime_setup
+from langflow.api.v1.runtime import (
+    RuntimeSetupRequest,
+    _ensure_runtime_variables,
+    _runtime_secret_values,
+    _setup_complete,
+    complete_runtime_setup,
+)
 from langflow.services.database.models import Job
 from langflow.services.database.models.deployment_release import DeploymentRelease
 from langflow.services.database.models.flow.model import Flow
@@ -15,6 +22,8 @@ from langflow.services.database.models.knowledge_base import KnowledgeBaseRecord
 from langflow.services.database.models.runtime_configuration import RuntimeConfiguration
 from langflow.services.database.models.runtime_document import DocumentVersion, RuntimeDocument
 from langflow.services.database.models.user.model import User
+from langflow.services.database.models.variable.model import Variable
+from langflow.services.deps import get_variable_service
 from langflow.services.runtime_setup import decrypt_runtime_secrets
 from sqlmodel import select
 
@@ -107,7 +116,7 @@ async def test_runtime_setup_persists_encrypted_secrets_and_first_admin(
     monkeypatch,
     tmp_path,
 ):
-    await _release(async_session, secret_names=["MODEL_TOKEN"])
+    release = await _release(async_session, secret_names=["MODEL_TOKEN"])
     _patch_setup_services(monkeypatch)
     key_path = tmp_path / "secrets" / "master.key"
     monkeypatch.setenv("UNNEST_MASTER_KEY_FILE", str(key_path))
@@ -142,6 +151,41 @@ async def test_runtime_setup_persists_encrypted_secrets_and_first_admin(
     assert admin.is_superuser is True
     assert admin.password == "hashed:strong-password"  # noqa: S105
     assert await _setup_complete(async_session) is True
+    secrets = await _runtime_secret_values(async_session, release)
+    assert secrets == {"MODEL_TOKEN": "top-secret"}
+    admin_id = admin.id
+    async_session.add(
+        Variable(
+            user_id=admin_id,
+            name="MODEL_TOKEN",
+            value="stale-plaintext",
+            type="Generic",
+        )
+    )
+    await async_session.commit()
+
+    @asynccontextmanager
+    async def variable_session_scope():
+        yield async_session
+
+    monkeypatch.setattr(runtime_module, "session_scope", variable_session_scope)
+    await _ensure_runtime_variables(admin_id, secrets)
+    variable = (
+        await async_session.exec(
+            select(Variable).where(
+                Variable.user_id == admin_id,
+                Variable.name == "MODEL_TOKEN",
+            )
+        )
+    ).one()
+    resolved = await get_variable_service().get_variable(
+        user_id=admin_id,
+        name="MODEL_TOKEN",
+        field="runtime",
+        session=async_session,
+    )
+    assert variable.type == "Credential"
+    assert resolved.get_secret_value() == "top-secret"
 
     with pytest.raises(HTTPException) as exc:
         await complete_runtime_setup(

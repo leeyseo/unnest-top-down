@@ -216,7 +216,15 @@ async def test_create_on_prem_release_from_saved_versions(
             "package_path": f"documents/source/{source_file_id}/guide.txt",
         }
     ]
-    assert set(body["manifest"]["services"]) == {"runtime", "redis", "postgresql"}
+    assert set(body["manifest"]["services"]) == {
+        "runtime",
+        "redis",
+        "postgresql",
+        "sandbox-controller",
+        "sandbox-executor",
+        "sandbox-gateway",
+        "sandbox-egress-proxy",
+    }
     assert {
         "service": "runtime",
         "name": "https",
@@ -462,22 +470,6 @@ async def test_validate_on_prem_release_routes_risky_flow_to_declared_sandbox_ne
                     "hashes": [f"sha256:{'a' * 64}"],
                 }
             ],
-            "os_packages": [
-                {
-                    "name": "libmagic1",
-                    "version": "1:5.44-3",
-                    "checksum": f"sha256:{'b' * 64}",
-                }
-            ],
-            "binaries": [
-                {
-                    "name": "agency-parser",
-                    "version": "2.0.0",
-                    "source": "https://packages.internal/agency-parser",
-                    "checksum": f"sha256:{'c' * 64}",
-                    "license": "Apache-2.0",
-                }
-            ],
         }
     }
     agent_version_id = await _snapshot(
@@ -503,11 +495,14 @@ async def test_validate_on_prem_release_routes_risky_flow_to_declared_sandbox_ne
     )
 
     assert response.status_code == status.HTTP_200_OK
-    assert response.json()["manifest"] is None
-    assert "Risky Flow export is blocked until the sandbox worker and egress policy are available" in response.json()[
-        "errors"
-    ]
-    assert "Offline MVP does not support OS package or external binary dependencies" in response.json()["errors"]
+    assert response.json()["errors"] == []
+    assert response.json()["manifest"]["sandbox"] == {
+        "required": True,
+        "risky_flow_version_ids": [str(agent_version_id)],
+        "max_attachment_bytes": 512 * 1024 * 1024,
+        "network_policy": "deny-by-default",
+        "allowed_endpoints": ["https://models.internal/v1"],
+    }
 
 
 async def test_validate_on_prem_release_rejects_unlocked_custom_dependency(

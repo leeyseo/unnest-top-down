@@ -24,6 +24,7 @@ from uuid import UUID, uuid4, uuid5
 import filetype
 import httpx
 from anyio import Path as AsyncPath
+from cryptography.fernet import InvalidToken
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from jsonschema import Draft202012Validator
@@ -52,7 +53,8 @@ from langflow.services.database.models.runtime_configuration import RuntimeConfi
 from langflow.services.database.models.runtime_document import DocumentVersion, IndexGeneration, RuntimeDocument
 from langflow.services.database.models.runtime_schedule import RuntimeSchedule
 from langflow.services.database.models.user.model import User
-from langflow.services.deployment import SandboxWorkerClient
+from langflow.services.database.models.variable.model import Variable
+from langflow.services.deployment.sandbox import SANDBOX_ATTACHMENT_PATH, SandboxWorkerClient
 from langflow.services.deps import (
     get_auth_service,
     get_db_service,
@@ -61,6 +63,7 @@ from langflow.services.deps import (
     get_settings_service,
     get_storage_service,
     get_task_service,
+    get_variable_service,
     session_scope,
 )
 from langflow.services.runtime_audit import (
@@ -100,6 +103,7 @@ from langflow.services.runtime_metrics import (
 from langflow.services.runtime_quota import RuntimeQuotaExceededError, get_runtime_quota_service
 from langflow.services.runtime_scheduler import next_cron_run
 from langflow.services.runtime_setup import (
+    decrypt_runtime_secrets,
     encrypt_runtime_secrets,
     generate_age_recovery_key,
     load_or_create_master_key,
@@ -107,6 +111,7 @@ from langflow.services.runtime_setup import (
     master_key_path,
 )
 from langflow.services.storage.service import StorageService
+from langflow.services.variable.constants import CREDENTIAL_TYPE
 
 router = APIRouter(tags=["Runtime"])
 MAX_ARCHIVE_MEMBERS = 10_000
@@ -638,14 +643,15 @@ def _release_index_fingerprint(release: DeploymentRelease) -> str:
 
 async def _run_ingestion_target(
     *,
+    release: DeploymentRelease,
     immutable: FlowRead,
     ingestion_data: dict[str, Any],
     subflows: dict[str, dict[str, Any]],
-    release_id: UUID,
     user: User,
     document: RuntimeDocument,
     version: DocumentVersion,
     physical_alias: str,
+    secrets: dict[str, str],
 ) -> None:
     storage_service = get_storage_service()
     namespace, storage_name = version.storage_path.split("/", 1)
@@ -656,9 +662,11 @@ async def _run_ingestion_target(
             temporary_directory = tempfile.TemporaryDirectory(prefix="unnest-ingestion-")
             component_path = str(Path(temporary_directory.name) / storage_name)
             await AsyncPath(component_path).write_bytes(await storage_service.get_file(namespace, storage_name))
+        file_input_id = _deployment_file_input_id(ingestion_data)
+        sandbox_required = release.manifest.get("sandbox", {}).get("required") is True
         tweaks = {
-            _deployment_file_input_id(ingestion_data): {
-                "file_path": component_path,
+            file_input_id: {
+                "file_path": SANDBOX_ATTACHMENT_PATH if sandbox_required else component_path,
                 "document_id": str(document.id),
                 "checksum": version.checksum,
                 "mime_type": version.mime_type,
@@ -679,15 +687,31 @@ async def _run_ingestion_target(
                     "metadata_json": json.dumps(metadata, sort_keys=True),
                 }
             )
-        await simple_run_flow(
-            flow=immutable,
-            input_request=SimplifiedAPIRequest(output_type="any", tweaks=tweaks),
-            api_key_user=user,
-            context={
-                "deployment_release_id": str(release_id),
-                "deployment_subflows": subflows,
-            },
-        )
+        input_request = SimplifiedAPIRequest(output_type="any", tweaks=tweaks)
+        if sandbox_required:
+            await _run_ingestion_in_sandbox(
+                release=release,
+                flow=immutable,
+                subflows=subflows,
+                input_request=input_request,
+                current_user=user,
+                source=Path(component_path),
+                component_id=file_input_id,
+                checksum=version.checksum,
+                size_bytes=version.size_bytes,
+                secrets=secrets,
+            )
+        else:
+            await _ensure_runtime_variables(user.id, secrets)
+            await simple_run_flow(
+                flow=immutable,
+                input_request=input_request,
+                api_key_user=user,
+                context={
+                    "deployment_release_id": str(release.id),
+                    "deployment_subflows": subflows,
+                },
+            )
     finally:
         if temporary_directory is not None:
             await asyncio.to_thread(temporary_directory.cleanup)
@@ -725,6 +749,7 @@ async def _execute_runtime_ingestion(
                 update={"data": copy.deepcopy(ingestion_version.data)}
             )
             subflows = await _immutable_subflows(session, release)
+            secrets = await _runtime_secret_values(session, release)
             fingerprint = _release_index_fingerprint(release)
             generation, reset_generation = await create_shadow_generation(
                 session,
@@ -793,14 +818,15 @@ async def _execute_runtime_ingestion(
                 },
             )
             await _run_ingestion_target(
+                release=release,
                 immutable=immutable,
                 ingestion_data=ingestion_data,
                 subflows=subflows,
-                release_id=release_id,
                 user=user,
                 document=target_document,
                 version=target_version,
                 physical_alias=physical_alias,
+                secrets=secrets,
             )
         async with session_scope() as session:
             job = await session.get(Job, job_id)
@@ -1044,11 +1070,16 @@ def _sandbox_payload(
     input_request: SimplifiedAPIRequest,
     current_user: User,
     trigger: str = "api",
+    secrets: dict[str, str] | None = None,
+    flow_role: Literal["agent", "ingestion"] = "agent",
+    flow_version_id: UUID | None = None,
+    attachment: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "execution_boundary": "whole-flow",
+        "flow_role": flow_role,
         "release_id": str(release.id),
-        "flow_version_id": str(release.agent_flow_version_id),
+        "flow_version_id": str(flow_version_id or release.agent_flow_version_id),
         "user_id": str(current_user.id),
         "flow": {
             "id": str(flow.id),
@@ -1061,6 +1092,8 @@ def _sandbox_payload(
             "runtime_session_metadata": _runtime_session_metadata(release, current_user, trigger),
         },
         "request": input_request.model_dump(mode="json"),
+        "secrets": copy.deepcopy(secrets or {}),
+        "attachment": copy.deepcopy(attachment),
         "security": {
             "run_as_non_root": True,
             "read_only_root_filesystem": True,
@@ -1085,12 +1118,21 @@ async def _run_in_sandbox(
     current_user: User,
     stream: bool,
     trigger: str,
+    secrets: dict[str, str],
 ):
     try:
         client = SandboxWorkerClient.from_env()
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-    payload = _sandbox_payload(release, flow, subflows, input_request, current_user, trigger)
+    payload = _sandbox_payload(
+        release,
+        flow,
+        subflows,
+        input_request,
+        current_user,
+        trigger,
+        secrets,
+    )
     try:
         if stream:
             response = await client.stream(payload)
@@ -1104,6 +1146,121 @@ async def _run_in_sandbox(
     except (httpx.HTTPError, TypeError, ValueError) as exc:
         await client.aclose()
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Sandbox worker execution failed") from exc
+
+
+async def _run_ingestion_in_sandbox(
+    *,
+    release: DeploymentRelease,
+    flow: FlowRead,
+    subflows: dict[str, dict[str, Any]],
+    input_request: SimplifiedAPIRequest,
+    current_user: User,
+    source: Path,
+    component_id: str,
+    checksum: str,
+    size_bytes: int,
+    secrets: dict[str, str],
+) -> None:
+    payload = _sandbox_payload(
+        release,
+        flow,
+        subflows,
+        input_request,
+        current_user,
+        "ingestion",
+        secrets,
+        flow_role="ingestion",
+        flow_version_id=release.ingestion_flow_version_id,
+        attachment={
+            "component_id": component_id,
+            "checksum": checksum,
+            "size_bytes": size_bytes,
+        },
+    )
+    try:
+        async with SandboxWorkerClient.from_env() as client:
+            await client.run_ingestion(payload, source)
+    except (httpx.HTTPError, OSError, TypeError, ValueError) as exc:
+        msg = "Sandbox ingestion execution failed"
+        raise RuntimeError(msg) from exc
+
+
+async def _runtime_secret_values(
+    session: DbSessionReadOnly,
+    release: DeploymentRelease,
+) -> dict[str, str]:
+    names = release.manifest.get("secret_names", [])
+    if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Release secret contract is invalid",
+        )
+    if not names:
+        return {}
+    configuration = await session.get(RuntimeConfiguration, 1)
+    if configuration is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Runtime secret configuration is unavailable",
+        )
+    try:
+        secrets = decrypt_runtime_secrets(configuration)
+    except (InvalidToken, OSError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Runtime secrets could not be decrypted",
+        ) from exc
+    if set(secrets) != set(names):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Runtime secrets do not match the release contract",
+        )
+    return secrets
+
+
+async def _ensure_runtime_variables(user_id: UUID, secrets: dict[str, str]) -> None:
+    if not secrets:
+        return
+    async with session_scope() as variable_session:
+        existing = (
+            await variable_session.exec(
+                select(Variable).where(
+                    Variable.user_id == user_id,
+                    Variable.name.in_(list(secrets)),
+                )
+            )
+        ).all()
+        by_name = {variable.name: variable for variable in existing}
+        service = get_variable_service()
+        for name, value in secrets.items():
+            variable = by_name.get(name)
+            if variable is None:
+                await service.create_variable(
+                    user_id=user_id,
+                    name=name,
+                    value=value,
+                    type_=CREDENTIAL_TYPE,
+                    session=variable_session,
+                )
+                continue
+            if variable.type != CREDENTIAL_TYPE:
+                variable.type = CREDENTIAL_TYPE
+                variable_session.add(variable)
+                await variable_session.flush()
+            current = await service.get_variable(
+                user_id=user_id,
+                name=name,
+                field="runtime",
+                session=variable_session,
+            )
+            current_value = current.get_secret_value() if isinstance(current, SecretStr) else current
+            if current_value != value:
+                await service.update_variable(
+                    user_id=user_id,
+                    name=name,
+                    value=value,
+                    session=variable_session,
+                )
 
 
 async def _run_agent(
@@ -1128,6 +1285,7 @@ async def _run_agent(
         flow=flow,
         input_request=input_request,
     )
+    secrets = await _runtime_secret_values(session, release)
     try:
         if release.manifest.get("sandbox", {}).get("required") is True:
             result = await _run_in_sandbox(
@@ -1138,8 +1296,10 @@ async def _run_agent(
                 current_user=current_user,
                 stream=stream,
                 trigger=trigger,
+                secrets=secrets,
             )
         else:
+            await _ensure_runtime_variables(current_user.id, secrets)
             # The route accepts no flow identifier: successful authentication grants
             # execution only of the release-pinned Agent version.
             result = await _run_flow_internal(
@@ -1432,6 +1592,16 @@ async def complete_runtime_setup(
 @router.get("/ready")
 async def ready(session: DbSessionReadOnly) -> dict[str, str]:
     release = await _release_for_api(session)
+    if release.manifest.get("sandbox", {}).get("required") is True:
+        try:
+            async with SandboxWorkerClient.from_env() as client:
+                if not await client.health():
+                    raise RuntimeError
+        except (httpx.HTTPError, RuntimeError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Sandbox worker is unavailable",
+            ) from exc
     license_status = runtime_license_status(str(release.manifest.get("release_digest") or ""))
     return {
         "status": "ok",

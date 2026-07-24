@@ -42,7 +42,7 @@ FROM ${BASE_IMAGE}
 USER 0
 COPY --chown=1000:0 bundle /opt/unnest
 ENV UNNEST_RELEASE_BUNDLE=/opt/unnest/release
-ENV DO_NOT_TRACK=true LANGFLOW_DO_NOT_TRACK=true
+ENV DO_NOT_TRACK=true LANGFLOW_DO_NOT_TRACK=true LANGFLOW_DEACTIVATE_TRACING=true
 RUN if [ -s /opt/unnest/release/wheels/requirements.lock ]; then \
       uv pip install --system --no-index \
         --find-links=/opt/unnest/release/wheels \
@@ -87,6 +87,8 @@ services:
   runtime:
     image: {runtime_image}
     pull_policy: never
+    group_add:
+      - "${{UNNEST_INSTALL_GID}}"
     depends_on:
       postgresql:
         condition: service_healthy
@@ -115,7 +117,12 @@ services:
       LANGFLOW_JOB_QUEUE_TYPE: redis
       LANGFLOW_REDIS_QUEUE_URL: redis://redis:6379/1
       LANGFLOW_CELERY_ENABLED: "false"
+      LANGFLOW_MAX_FILE_SIZE_UPLOAD: "512"
       LANGFLOW_AUTO_LOGIN: "false"
+      UNNEST_SANDBOX_WORKER_URL: https://sandbox-gateway:8090
+      UNNEST_SANDBOX_WORKER_CA: /opt/unnest/sandbox-tls/ca.crt
+      UNNEST_SANDBOX_WORKER_CERT: /opt/unnest/sandbox-tls/client.crt
+      UNNEST_SANDBOX_WORKER_KEY: /opt/unnest/sandbox-tls/client.key
       UNNEST_MASTER_KEY_FILE: /app/langflow/secrets/master.key
       UNNEST_BACKUP_DIR: /app/langflow/backups
       DO_NOT_TRACK: "true"
@@ -124,16 +131,161 @@ services:
       - "7860:7860"
     volumes:
       - runtime-data:/app/langflow
-      - ./tls:/opt/unnest/tls:ro
+      - ./tls:/opt/unnest/tls:ro,Z
+      - ./sandbox-tls/runtime:/opt/unnest/sandbox-tls:ro,Z
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777
+    restart: unless-stopped
+
+  sandbox-controller:
+    image: {runtime_image}
+    pull_policy: never
+    group_add:
+      - "${{UNNEST_INSTALL_GID}}"
+    command:
+      - uvicorn
+      - langflow.services.deployment.sandbox_worker:create_sandbox_controller_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8090"
+      - --ssl-ca-certs
+      - /opt/unnest/sandbox-tls/ca.crt
+      - --ssl-certfile
+      - /opt/unnest/sandbox-tls/server.crt
+      - --ssl-keyfile
+      - /opt/unnest/sandbox-tls/server.key
+      - --ssl-cert-reqs
+      - "2"
+    environment:
+      UNNEST_SANDBOX_EXECUTOR_URL: http://sandbox-executor:8091
+      UNNEST_SANDBOX_RELEASE_BUNDLE: /opt/unnest/release
+      UNNEST_SANDBOX_EXECUTION_TIMEOUT_SECONDS: "300"
+      DO_NOT_TRACK: "true"
+      LANGFLOW_DO_NOT_TRACK: "true"
+    user: "1000:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    cpus: "0.5"
+    mem_limit: 512m
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    volumes:
+      - ./sandbox-tls/worker:/opt/unnest/sandbox-tls:ro,Z
+    networks:
+      - sandbox-control
+      - sandbox-execution
+    restart: unless-stopped
+
+  sandbox-executor:
+    image: {runtime_image}
+    pull_policy: never
+    command:
+      - uvicorn
+      - langflow.services.deployment.sandbox_worker:create_sandbox_worker_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8091"
+    environment:
+      LANGFLOW_DATABASE_URL: sqlite:////tmp/sandbox.db
+      LANGFLOW_CONFIG_DIR: /tmp/langflow
+      LANGFLOW_AUTO_LOGIN: "false"
+      LANGFLOW_DATABASE_CONNECTION_RETRY: "false"
+      LANGFLOW_MAX_FILE_SIZE_UPLOAD: "512"
+      UNNEST_RELEASE_BUNDLE: ""
+      UNNEST_SANDBOX_RELEASE_BUNDLE: /opt/unnest/release
+      UNNEST_SANDBOX_EXECUTION_TIMEOUT_SECONDS: "300"
+      HTTP_PROXY: http://sandbox-egress-proxy:8080
+      HTTPS_PROXY: http://sandbox-egress-proxy:8080
+      http_proxy: http://sandbox-egress-proxy:8080
+      https_proxy: http://sandbox-egress-proxy:8080
+      NO_PROXY: sandbox-executor,localhost,127.0.0.1
+      no_proxy: sandbox-executor,localhost,127.0.0.1
+      DO_NOT_TRACK: "true"
+      LANGFLOW_DO_NOT_TRACK: "true"
+      LANGFLOW_MODELS_DEV_REFRESH: "false"
+    user: "1000:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    cpus: "1.0"
+    mem_limit: 2g
+    tmpfs:
+      - /tmp:size=768m,mode=1777
+    networks:
+      - sandbox-execution
+      - sandbox-egress
+    restart: unless-stopped
+
+  sandbox-gateway:
+    image: {runtime_image}
+    pull_policy: never
+    command:
+      - python
+      - -m
+      - langflow.services.deployment.sandbox_network
+      - relay
+      - --listen
+      - 0.0.0.0:8090
+      - --target
+      - sandbox-controller:8090
+    user: "1000:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - default
+      - sandbox-control
+    restart: unless-stopped
+
+  sandbox-egress-proxy:
+    image: {runtime_image}
+    pull_policy: never
+    command:
+      - python
+      - -m
+      - langflow.services.deployment.sandbox_network
+      - proxy
+      - --listen
+      - 0.0.0.0:8080
+      - --bundle
+      - /opt/unnest/release
+    user: "1000:0"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - default
+      - sandbox-egress
     restart: unless-stopped
 
 volumes:
   runtime-data:
   postgres-data:
   redis-data:
+
+networks:
+  sandbox-control:
+    internal: true
+  sandbox-execution:
+    internal: true
+  sandbox-egress:
+    internal: true
 """
 
 
@@ -193,9 +345,6 @@ class BuildRequest(BaseModel):
             or deployment.get("architecture") != "amd64"
         ):
             msg = "Build request is not an approved offline MVP profile"
-            raise ValueError(msg)
-        if self.manifest.get("sandbox", {}).get("required"):
-            msg = "Risky Flow export requires the sandbox worker, which is not available"
             raise ValueError(msg)
         validated_dependency_lock(self.manifest)
         validated_source_document_manifest(self.manifest)

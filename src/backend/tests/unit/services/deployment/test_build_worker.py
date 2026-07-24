@@ -42,6 +42,17 @@ def test_build_request_rejects_dependency_lock_not_declared_by_flows():
         BuildRequest.model_validate(request)
 
 
+def test_build_request_accepts_release_requiring_whole_flow_sandbox():
+    request = _request(uuid4(), f"sha256:{'a' * 64}").model_dump(mode="json")
+    request["manifest"]["sandbox"] = {
+        "required": True,
+        "network_policy": "deny-by-default",
+        "allowed_endpoints": ["https://models.internal/v1"],
+    }
+
+    assert BuildRequest.model_validate(request).manifest["sandbox"]["required"] is True
+
+
 async def test_mtls_client_and_worker_transfer_source_documents_as_multipart(tmp_path):
     source_id = uuid4()
     contents = b"source bytes crossing the control-plane worker boundary"
@@ -317,6 +328,21 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
             "wheels/requirements.lock",
             f"documents/source/{source_id}/guide.txt",
         }.issubset(names)
+        compose = package.extractfile("compose/compose.yml")
+        assert compose is not None
+        compose_text = compose.read().decode()
+        assert "sandbox-controller:" in compose_text
+        assert "sandbox-executor:" in compose_text
+        assert compose_text.count("group_add:") == 2
+        assert compose_text.count('"${UNNEST_INSTALL_GID}"') == 2
+        assert compose_text.count('UNNEST_SANDBOX_EXECUTION_TIMEOUT_SECONDS: "300"') == 2
+        assert compose_text.count('LANGFLOW_MAX_FILE_SIZE_UPLOAD: "512"') == 2
+        assert compose_text.count(":ro,Z") == 3
+        assert "read_only: true" in compose_text
+        assert "no-new-privileges:true" in compose_text
+        assert "sandbox-control:" in compose_text
+        assert "sandbox-egress:" in compose_text
+        assert compose_text.count("internal: true") == 3
     assert [command[0] for command in commands].count("buildctl") == 2
     assert [command[0] for command in commands].count("trivy") == 12
     assert [command[0] for command in commands].count("cosign") == 2

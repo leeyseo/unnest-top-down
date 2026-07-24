@@ -22,6 +22,7 @@ from sqlmodel import col, select
 from langflow.agentic.helpers.code_security import scan_code_security
 from langflow.services.database.models.flow.model import Flow
 from langflow.services.database.models.flow_version.model import FlowVersion
+from langflow.services.deployment.sandbox import SANDBOX_MAX_ATTACHMENT_BYTES
 
 if TYPE_CHECKING:
     from sqlmodel.ext.asyncio.session import AsyncSession
@@ -60,6 +61,10 @@ _SERVICE_PORTS = {
     "runtime": [("http", 7860)],
     "postgresql": [("postgresql", 5432)],
     "redis": [("redis", 6379)],
+    "sandbox-controller": [("https", 8090)],
+    "sandbox-executor": [("http", 8091)],
+    "sandbox-gateway": [("https", 8090)],
+    "sandbox-egress-proxy": [("http-connect", 8080)],
     "minio": [("api", 9000), ("console", 9001)],
     "clamav": [("clamd", 3310)],
     "prometheus": [("http", 9090)],
@@ -118,7 +123,15 @@ def _conversation_persistence_components(data: dict[str, Any]) -> list[str]:
 
 
 def _deployment_services(config: OnPremDeploymentConfig, detected: set[str]) -> list[str]:
-    services = {*detected, "runtime", "redis"}
+    services = {
+        *detected,
+        "runtime",
+        "redis",
+        "sandbox-controller",
+        "sandbox-executor",
+        "sandbox-gateway",
+        "sandbox-egress-proxy",
+    }
     if config.database == "embedded-postgresql":
         services.add("postgresql")
     if config.storage == "minio":
@@ -751,6 +764,7 @@ async def analyze_release(
     allowed_sandbox_endpoints: set[str] = set()
     dependency_lock = {kind: [] for kind in _DEPENDENCY_KINDS}
     sandbox = False
+    sandbox_flow_version_ids: list[str] = []
     for role, version in [
         ("agent", agent_version),
         ("ingestion", ingestion_version),
@@ -768,6 +782,7 @@ async def analyze_release(
             flow_declared_dependencies,
         ) = _inspect_flow(version)
         entry["declared_dependencies"] = flow_declared_dependencies
+        entry["sandbox_required"] = flow_sandbox
         persistence_components = (
             _conversation_persistence_components(version.data) if isinstance(version.data, dict) else []
         )
@@ -787,12 +802,21 @@ async def analyze_release(
         allowed_sandbox_endpoints.update(flow_allowed_sandbox_endpoints)
         errors.extend(_merge_declared_dependencies(dependency_lock, flow_declared_dependencies))
         sandbox = sandbox or flow_sandbox
+        if flow_sandbox:
+            sandbox_flow_version_ids.append(str(version.id))
 
     if dependency_lock["os_packages"] or dependency_lock["binaries"]:
         errors.append("Offline MVP does not support OS package or external binary dependencies")
-    if sandbox:
-        errors.append("Risky Flow export is blocked until the sandbox worker and egress policy are available")
-
+    if sandbox and any(
+        isinstance(source.get("size_bytes"), int)
+        and not isinstance(source.get("size_bytes"), bool)
+        and source["size_bytes"] > SANDBOX_MAX_ATTACHMENT_BYTES
+        for source in (source_documents or [])
+        if isinstance(source, dict)
+    ):
+        errors.append(
+            f"Sandbox releases support source documents up to {SANDBOX_MAX_ATTACHMENT_BYTES} bytes each"
+        )
     api_version = next_api_version(previous_manifest, api.input_schema, api.output_schema)
     acceptance_payload = (
         [test.model_dump(mode="json") for test in acceptance_tests]
@@ -820,7 +844,16 @@ async def analyze_release(
     )
     errors.extend(_acceptance_errors(acceptance_payload))
     deployment_services = _deployment_services(config, services)
-    unsupported_services = sorted(set(deployment_services).difference({"runtime", "postgresql", "redis"}))
+    supported_services = {
+        "runtime",
+        "postgresql",
+        "redis",
+        "sandbox-controller",
+        "sandbox-executor",
+        "sandbox-gateway",
+        "sandbox-egress-proxy",
+    }
+    unsupported_services = sorted(set(deployment_services).difference(supported_services))
     if unsupported_services:
         errors.append(f"Offline MVP does not yet package services: {', '.join(unsupported_services)}")
     manifest = {
@@ -863,6 +896,8 @@ async def analyze_release(
         "knowledge_base_alias": next(iter(shared_knowledge_aliases), None),
         "sandbox": {
             "required": sandbox,
+            "risky_flow_version_ids": sorted(sandbox_flow_version_ids),
+            "max_attachment_bytes": SANDBOX_MAX_ATTACHMENT_BYTES,
             "network_policy": "deny-by-default" if sandbox else "not-applicable",
             "allowed_endpoints": sorted(allowed_sandbox_endpoints),
         },

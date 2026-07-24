@@ -29,7 +29,7 @@ from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from langflow.services.deployment.offline_dependencies import DependencyLockError, verify_locked_wheels
 from langflow.services.deployment.offline_package import (
@@ -362,8 +362,6 @@ def _validate_layout(package: Path, manifest: dict[str, Any], checked: set[str])
     deployment = manifest.get("deployment")
     if not isinstance(deployment, dict) or any(deployment.get(name) != value for name, value in _MVP_PROFILE.items()):
         raise PackageValidationError("Release does not use the supported offline MVP profile")
-    if manifest.get("sandbox", {}).get("required") is True:
-        raise PackageValidationError("Risky Flow package requires an unavailable sandbox worker")
     for relative in _REQUIRED_LAYOUT_FILES:
         if not _package_file(package, relative).is_file():
             raise PackageValidationError(f"Required package file is missing: {relative}")
@@ -723,7 +721,105 @@ def _write_tls_material(
     certificate_destination.write_bytes(certificate_blob)
     key_destination.write_bytes(key_blob)
     certificate_destination.chmod(0o644)
-    key_destination.chmod(0o600)
+    if os.geteuid() == 0:
+        os.chown(destination, 0, 0)
+        os.chown(key_destination, 0, 0)
+    destination.chmod(0o750)
+    key_destination.chmod(0o640)
+
+
+def _write_sandbox_mtls_material(destination: Path) -> None:
+    """Create a local CA with separate Runtime-client and Worker-server keys."""
+    runtime_directory = destination / "runtime"
+    worker_directory = destination / "worker"
+    runtime_directory.mkdir(parents=True)
+    worker_directory.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Unnest sandbox local CA")])
+    ca_certificate = (
+        x509.CertificateBuilder()
+        .subject_name(ca_subject)
+        .issuer_name(ca_subject)
+        .public_key(ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=1))
+        .not_valid_after(now + timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+
+    def issue(common_name: str, usage: ExtendedKeyUsageOID, *, server: bool) -> tuple[bytes, bytes]:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        builder = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)]))
+            .issuer_name(ca_subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1))
+            .not_valid_after(now + timedelta(days=825))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([usage]), critical=True)
+        )
+        if server:
+            builder = builder.add_extension(
+                x509.SubjectAlternativeName([x509.DNSName("sandbox-gateway")]),
+                critical=False,
+            )
+        certificate = builder.sign(ca_key, hashes.SHA256())
+        return (
+            certificate.public_bytes(serialization.Encoding.PEM),
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            ),
+        )
+
+    server_certificate, server_key = issue(
+        "sandbox-gateway",
+        ExtendedKeyUsageOID.SERVER_AUTH,
+        server=True,
+    )
+    client_certificate, client_key = issue(
+        "unnest-runtime",
+        ExtendedKeyUsageOID.CLIENT_AUTH,
+        server=False,
+    )
+    ca_blob = ca_certificate.public_bytes(serialization.Encoding.PEM)
+    materials = {
+        runtime_directory / "ca.crt": (ca_blob, 0o644),
+        runtime_directory / "client.crt": (client_certificate, 0o644),
+        runtime_directory / "client.key": (client_key, 0o640),
+        worker_directory / "ca.crt": (ca_blob, 0o644),
+        worker_directory / "server.crt": (server_certificate, 0o644),
+        worker_directory / "server.key": (server_key, 0o640),
+    }
+    for path, (contents, mode) in materials.items():
+        path.write_bytes(contents)
+        if os.geteuid() == 0:
+            os.chown(path, 0, 0)
+        path.chmod(mode)
+    if os.geteuid() == 0:
+        os.chown(runtime_directory, 0, 0)
+        os.chown(worker_directory, 0, 0)
+    runtime_directory.chmod(0o750)
+    worker_directory.chmod(0o750)
 
 
 def _prepare_install_directory(
@@ -758,7 +854,18 @@ def _prepare_install_directory(
             raise PackageValidationError("Existing release install directory contains a different release")
         if not all(
             (release_directory / relative).is_file()
-            for relative in (".env", "compose.yml", "tls/server.crt", "tls/server.key")
+            for relative in (
+                ".env",
+                "compose.yml",
+                "tls/server.crt",
+                "tls/server.key",
+                "sandbox-tls/runtime/ca.crt",
+                "sandbox-tls/runtime/client.crt",
+                "sandbox-tls/runtime/client.key",
+                "sandbox-tls/worker/ca.crt",
+                "sandbox-tls/worker/server.crt",
+                "sandbox-tls/worker/server.key",
+            )
         ):
             raise PackageValidationError("Existing release install directory is incomplete")
         return release_directory
@@ -776,7 +883,11 @@ def _prepare_install_directory(
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(package / source_relative, destination)
         environment = staging_directory / ".env"
-        environment.write_text(f"UNNEST_DB_PASSWORD={secrets.token_urlsafe(32)}\n", encoding="utf-8")
+        environment.write_text(
+            f"UNNEST_DB_PASSWORD={secrets.token_urlsafe(32)}\n"
+            f"UNNEST_INSTALL_GID={os.getegid()}\n",
+            encoding="utf-8",
+        )
         environment.chmod(0o600)
         _write_tls_material(
             staging_directory / "tls",
@@ -784,6 +895,7 @@ def _prepare_install_directory(
             certificate=certificate,
             private_key=private_key,
         )
+        _write_sandbox_mtls_material(staging_directory / "sandbox-tls")
         staging_directory.replace(release_directory)
     return release_directory
 

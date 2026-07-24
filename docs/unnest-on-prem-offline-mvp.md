@@ -12,11 +12,11 @@ government administrator installs the resulting release on an internet-isolated
 server, completes setup in a browser, and runs both safe and sandboxed flows
 without transferring runtime data to the SI network.
 
-The current layout-v2 checkpoint implements the signed safe-Flow package,
-installer, hash-locked Python wheel bundle, and immutable source-document
-bundle. It deliberately blocks risky Flows until the sandbox checkpoint is
-implemented. That blocked feature remains part of this final definition of
-done.
+The current layout-v2 checkpoint implements the signed package, installer,
+hash-locked Python wheel bundle, immutable source-document bundle, and
+whole-Flow sandbox path. The remaining release gate is the executable
+air-gapped Rocky Linux acceptance run described below; mocked command and ASGI
+tests do not replace that host-level proof.
 
 ## Supported profile
 
@@ -110,13 +110,20 @@ Docker Compose starts:
 
 - the Runtime API and restricted Runtime UI;
 - PostgreSQL;
-- Redis.
+- Redis;
+- a key-holding sandbox Controller;
+- an unprivileged sandbox Executor;
+- an mTLS pass-through gateway; and
+- a manifest-driven egress allowlist proxy.
 
-Safe Flow execution currently runs in the Runtime process, which is the only
-executor actually connected to the Runtime API. Export validation blocks risky
-Flows instead of packaging the existing sandbox client stub. A sandbox worker
-and allowlist proxy are added only after their server protocol and isolation
-tests exist; that checkpoint will increment the package layout.
+Safe Flow execution runs in the Runtime process. A release containing risky
+capabilities routes Agent and Ingestion execution through the sandbox
+Controller and Executor. Runtime authenticates to the Controller with a
+dedicated client certificate. The Controller has the server key and validates
+the request against the immutable image bundle, while the process executing
+custom code has no TLS private key. The Executor receives an uploaded
+ingestion file as a checksum-bound stream into a disposable workspace; the
+Runtime data volume and master key are never mounted into it.
 
 The same immutable release snapshot is used by REST, streaming, web chat,
 webhook, and cron execution.
@@ -152,11 +159,22 @@ Runtime/sandbox boundary.
 
 The sandbox must run as a non-root user with a read-only root filesystem,
 dropped Linux capabilities, no privilege escalation, bounded CPU, memory, disk,
-and execution time, and a disposable writable workspace.
+and execution time, and a disposable writable workspace. The Compose profile
+sets a five-minute whole-execution limit and a bounded tmpfs. Runtime uploads
+and bundled source documents routed through the sandbox are limited to 512 MiB
+per file; export rejects a larger bundled source document for such a release.
 
 Sandbox network access is denied by default. Only government-internal endpoints
 declared in the immutable release manifest are reachable through the egress
-proxy. Internet access and undeclared internal addresses are blocked.
+proxy. The Executor is attached only to internal Docker networks; the proxy is
+the sole bridge to the normal service network. Internet access and undeclared
+internal addresses are rejected by the proxy.
+
+The sandbox protocol re-verifies the release ID, role-specific Flow Version and
+digest, complete Subflow closure, security policy, endpoint allowlist, and exact
+secret-name set in both the Controller and Executor. Secret values are
+forwarded only after this validation and are stored as encrypted credential
+variables in the Executor's disposable SQLite database.
 
 ## Bundled documents
 
@@ -261,7 +279,11 @@ begins.
    - Apply `backend-code-review`; reserve Playwright `e2e-testing` for the
      Wizard/UI checkpoint.
 4. **Sandbox worker and allowlist proxy**
-   - Prove isolation with adversarial tests.
+   - Implement role-bound Agent and streamed Ingestion execution, separate
+     Controller/Executor key boundaries, deny-by-default networking, checksum
+     verification, and execution time limits.
+   - Retain ASGI/proxy adversarial tests, but do not treat them as the
+     host-level isolation proof.
    - Apply `backend-code-review` and `e2e-testing`.
 5. **Wizard and Runtime UI completion**
    - Use `.agents/skills/frontend-query-mutation` for API hooks.

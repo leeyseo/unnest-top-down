@@ -1,3 +1,4 @@
+import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
@@ -13,6 +14,7 @@ from langflow.api.v1.runtime import (
     _contract_output,
     _immutable_agent_flow,
     _immutable_subflows,
+    _run_ingestion_target,
     _sandbox_payload,
     execute_scheduled_agent,
     list_sessions,
@@ -470,6 +472,7 @@ def test_sandbox_payload_preserves_whole_flow_boundary():
     )
 
     assert payload["execution_boundary"] == "whole-flow"
+    assert payload["flow_role"] == "agent"
     assert payload["flow"]["data"] == flow.data
     assert payload["context"]["deployment_subflows"]["subflow-id"]["name"] == "released-subflow"
     assert payload["context"]["runtime_session_metadata"] == {
@@ -506,6 +509,7 @@ async def test_risky_release_dispatches_entire_flow_to_sandbox(monkeypatch):
         lambda *_args: SimplifiedAPIRequest(input_value="hello"),
     )
     monkeypatch.setattr("langflow.api.v1.runtime._run_in_sandbox", sandbox_run)
+    monkeypatch.setattr("langflow.api.v1.runtime._runtime_secret_values", AsyncMock(return_value={}))
     monkeypatch.setattr("langflow.api.v1.runtime._run_flow_internal", standard_run)
     monkeypatch.setattr("langflow.api.v1.runtime._record_runtime_audit_event", audit_event)
 
@@ -526,6 +530,80 @@ async def test_risky_release_dispatches_entire_flow_to_sandbox(monkeypatch):
     standard_run.assert_not_awaited()
     audit_event.assert_awaited_once()
     assert audit_event.call_args.kwargs["details"]["status"] == "stream_started"
+
+
+async def test_risky_ingestion_streams_document_to_whole_flow_sandbox(tmp_path, monkeypatch):
+    contents = b"government upload"
+    source = tmp_path / "upload.pdf"
+    source.write_bytes(contents)
+    user = User(username="sandbox-ingestion", password="unused", is_active=True)  # noqa: S106
+    flow = FlowRead.model_validate(
+        Flow(
+            name="sandbox-ingestion",
+            user_id=user.id,
+            data={
+                "nodes": [
+                    {
+                        "id": "deployment-file",
+                        "data": {
+                            "type": "DeploymentFileInput",
+                            "node": {"name": "DeploymentFileInput"},
+                        },
+                    }
+                ],
+                "edges": [],
+            },
+        ),
+        from_attributes=True,
+    )
+    release = DeploymentRelease(
+        user_id=user.id,
+        version="1.0.0",
+        agent_flow_version_id=uuid4(),
+        ingestion_flow_version_id=uuid4(),
+        config={},
+        manifest={"sandbox": {"required": True}},
+    )
+    document = RuntimeDocument(
+        user_id=user.id,
+        knowledge_base_id=uuid4(),
+        name="upload.pdf",
+    )
+    version = DocumentVersion(
+        document_id=document.id,
+        version_number=1,
+        checksum=f"sha256:{hashlib.sha256(contents).hexdigest()}",
+        mime_type="application/pdf",
+        size_bytes=len(contents),
+        storage_path="runtime-documents/upload.pdf",
+    )
+    storage = MagicMock()
+    storage.resolve_component_path.return_value = str(source)
+    sandbox_run = AsyncMock()
+    standard_run = AsyncMock()
+    monkeypatch.setattr("langflow.api.v1.runtime.get_storage_service", lambda: storage)
+    monkeypatch.setattr("langflow.api.v1.runtime._run_ingestion_in_sandbox", sandbox_run)
+    monkeypatch.setattr("langflow.api.v1.runtime.simple_run_flow", standard_run)
+
+    await _run_ingestion_target(
+        release=release,
+        immutable=flow,
+        ingestion_data=flow.data,
+        subflows={},
+        user=user,
+        document=document,
+        version=version,
+        physical_alias="shared--generation",
+        secrets={"MODEL_TOKEN": "secret"},
+    )
+
+    sandbox_run.assert_awaited_once()
+    assert sandbox_run.call_args.kwargs["source"] == source
+    assert (
+        sandbox_run.call_args.kwargs["input_request"].tweaks.root["deployment-file"]["file_path"]
+        == "__UNNEST_SANDBOX_ATTACHMENT__"
+    )
+    standard_run.assert_not_awaited()
 
 
 async def test_cron_uses_same_immutable_agent_execution_path(async_session, monkeypatch):
