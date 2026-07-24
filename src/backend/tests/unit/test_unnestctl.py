@@ -8,6 +8,7 @@ import stat
 import tarfile
 from io import BytesIO
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -22,6 +23,8 @@ from langflow.unnestctl import (
     PackageValidationError,
     _tcp_port_available,
     app,
+    download_installed_backup,
+    inspect_installation,
     preflight,
     run_acceptance,
     verify_package,
@@ -182,6 +185,35 @@ def _write_signed_package(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return root
 
 
+def _write_installed_release(
+    root: Path,
+    package: Path,
+    *,
+    services: list[str],
+) -> Path:
+    release = root / "releases" / "1.0.0"
+    (release / "manifest").mkdir(parents=True)
+    manifest = json.loads((package / "manifest/release.json").read_text())
+    manifest["services"] = services
+    (release / "manifest/release.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (release / "tls").mkdir()
+    (release / "tls/server.crt").write_text("test certificate", encoding="utf-8")
+    (release / ".env").write_text("UNNEST_DB_PASSWORD=test\n", encoding="utf-8")
+    (release / "compose.yml").write_text("services: {}\n", encoding="utf-8")
+    (root / "current.json").write_text(
+        json.dumps(
+            {
+                "release_version": manifest["release_version"],
+                "release_digest": manifest["release_digest"],
+                "directory": str(release),
+                "url": "https://127.0.0.1:7860/setup",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return release
+
+
 def test_verify_package_checks_checksums_signatures_and_license(tmp_path, monkeypatch):
     package = _write_signed_package(tmp_path / "package", monkeypatch)
 
@@ -327,6 +359,123 @@ def test_install_loads_verified_images_and_starts_persistent_compose(tmp_path, m
     assert stat.S_IMODE((runtime_tls / "client.key").stat().st_mode) == 0o640
     assert stat.S_IMODE((worker_tls / "server.key").stat().st_mode) == 0o640
     assert json.loads((install_root / "current.json").read_text())["url"] == "https://127.0.0.1:7860/setup"
+
+
+def test_status_reports_compose_health_and_pre_setup_readiness(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
+    install_root = tmp_path / "installed"
+    services = ["runtime", "postgresql", "redis", "sandbox-controller"]
+    release = _write_installed_release(install_root, package, services=services)
+    commands = []
+    monkeypatch.setattr(
+        "langflow.unnestctl._run_capture",
+        lambda command, cwd: commands.append((command, cwd)) or "\n".join(services),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200 if request.url.path == "/health" else 503)
+
+    result = inspect_installation(
+        install_root,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result["healthy"] is True
+    assert result["ready"] is False
+    assert result["missing_services"] == []
+    assert result["unexpected_services"] == []
+    assert commands[0][1] == release
+    assert commands[0][0][-4:] == ["ps", "--services", "--status", "running"]
+
+
+def test_backup_logs_in_downloads_and_verifies_encrypted_archive(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
+    install_root = tmp_path / "installed"
+    _write_installed_release(install_root, package, services=["runtime"])
+    backup_id = str(uuid4())
+    contents = b"encrypted-runtime-backup"
+    checksum = hashlib.sha256(contents).hexdigest()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/login":
+            assert b"username=runtime-admin" in request.content
+            assert b"password=strong-password" in request.content
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "token_type": "bearer",
+                },
+            )
+        assert request.headers["authorization"] == "Bearer access-token"
+        if request.url.path == "/api/v1/admin/backups":
+            return httpx.Response(
+                201,
+                json={
+                    "id": backup_id,
+                    "checksum": checksum,
+                    "size_bytes": len(contents),
+                    "created_at": "2026-07-24T00:00:00Z",
+                },
+            )
+        return httpx.Response(
+            200,
+            content=contents,
+            headers={"X-Checksum-SHA256": checksum},
+        )
+
+    destination = download_installed_backup(
+        install_root,
+        admin_username="runtime-admin",
+        admin_password="strong-password",  # noqa: S106
+        output_directory=tmp_path / "backups",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert destination.read_bytes() == contents
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
+
+def test_backup_deletes_download_when_integrity_check_fails(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
+    install_root = tmp_path / "installed"
+    _write_installed_release(install_root, package, services=["runtime"])
+    backup_id = str(uuid4())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/login":
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "token_type": "bearer",
+                },
+            )
+        if request.url.path == "/api/v1/admin/backups":
+            return httpx.Response(
+                201,
+                json={
+                    "id": backup_id,
+                    "checksum": hashlib.sha256(b"expected").hexdigest(),
+                    "size_bytes": len(b"tampered"),
+                    "created_at": "2026-07-24T00:00:00Z",
+                },
+            )
+        return httpx.Response(200, content=b"tampered")
+
+    output = tmp_path / "backups"
+    with pytest.raises(PackageValidationError, match="integrity verification"):
+        download_installed_backup(
+            install_root,
+            admin_username="runtime-admin",
+            admin_password="strong-password",  # noqa: S106
+            output_directory=output,
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert list(output.iterdir()) == []
 
 
 def test_acceptance_runs_signed_required_tests_and_sends_api_key(tmp_path, monkeypatch):

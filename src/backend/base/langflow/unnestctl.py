@@ -18,10 +18,12 @@ import stat
 import tarfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from http import HTTPStatus
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
+from uuid import UUID
 
 import httpx
 import typer
@@ -900,6 +902,204 @@ def _prepare_install_directory(
     return release_directory
 
 
+def _installed_release(install_root: Path) -> tuple[Path, dict[str, Any], str]:
+    if install_root.is_symlink():
+        raise PackageValidationError("Install root must not be a symbolic link")
+    root = install_root.resolve()
+    marker_path = root / "current.json"
+    if not marker_path.is_file() or marker_path.is_symlink():
+        raise PackageValidationError("Unnest is not installed")
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PackageValidationError("Installed release marker is invalid") from exc
+    if not isinstance(marker, dict):
+        raise PackageValidationError("Installed release marker is invalid")
+    raw_directory = marker.get("directory")
+    if not isinstance(raw_directory, str) or not Path(raw_directory).is_absolute():
+        raise PackageValidationError("Installed release directory is invalid")
+    configured_directory = Path(raw_directory)
+    if configured_directory.is_symlink():
+        raise PackageValidationError("Installed release directory is invalid")
+    release_directory = configured_directory.resolve()
+    if root not in release_directory.parents or not release_directory.is_dir():
+        raise PackageValidationError("Installed release directory is invalid")
+    manifest = load_manifest(release_directory)
+    if (
+        marker.get("release_version") != manifest.get("release_version")
+        or marker.get("release_digest") != manifest.get("release_digest")
+    ):
+        raise PackageValidationError("Installed release marker does not match its manifest")
+    raw_url = marker.get("url")
+    parsed_url = urlparse(raw_url) if isinstance(raw_url, str) else None
+    if (
+        parsed_url is None
+        or parsed_url.scheme != "https"
+        or not parsed_url.hostname
+        or parsed_url.username
+        or parsed_url.password
+        or parsed_url.query
+        or parsed_url.fragment
+        or parsed_url.path != "/setup"
+    ):
+        raise PackageValidationError("Installed Runtime URL is invalid")
+    for relative in (".env", "compose.yml", "tls/server.crt"):
+        path = release_directory / relative
+        if not path.is_file() or path.is_symlink():
+            raise PackageValidationError("Installed release is incomplete")
+    return release_directory, manifest, f"{parsed_url.scheme}://{parsed_url.netloc}"
+
+
+def _run_capture(command: list[str], cwd: Path) -> str:
+    import subprocess
+
+    completed = subprocess.run(  # noqa: S603
+        command,
+        cwd=cwd,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode:
+        raise PackageValidationError(f"Command failed with exit code {completed.returncode}: {command[0]}")
+    return completed.stdout
+
+
+def inspect_installation(
+    install_root: Path,
+    *,
+    transport: httpx.BaseTransport | None = None,
+) -> dict[str, Any]:
+    """Inspect Compose processes and the installed Runtime health endpoints."""
+    release_directory, manifest, base_url = _installed_release(install_root)
+    running_output = _run_capture(
+        [
+            "docker",
+            "compose",
+            "--env-file",
+            ".env",
+            "-f",
+            "compose.yml",
+            "ps",
+            "--services",
+            "--status",
+            "running",
+        ],
+        release_directory,
+    )
+    running = sorted({line.strip() for line in running_output.splitlines() if line.strip()})
+    expected = sorted(
+        service
+        for service in manifest.get("services", [])
+        if isinstance(service, str)
+    )
+    missing = sorted(set(expected).difference(running))
+    unexpected = sorted(set(running).difference(expected))
+    verify: bool | str = str(release_directory / "tls" / "server.crt") if transport is None else False
+    endpoint_status: dict[str, int | None] = {}
+    with httpx.Client(base_url=base_url, verify=verify, transport=transport, timeout=5, trust_env=False) as client:
+        for path in ("/health", "/ready"):
+            try:
+                endpoint_status[path] = client.get(path).status_code
+            except httpx.HTTPError:
+                endpoint_status[path] = None
+    return {
+        "release_version": manifest.get("release_version"),
+        "release_digest": manifest.get("release_digest"),
+        "base_url": base_url,
+        "running_services": running,
+        "missing_services": missing,
+        "unexpected_services": unexpected,
+        "health_status": endpoint_status["/health"],
+        "ready_status": endpoint_status["/ready"],
+        "healthy": not missing and not unexpected and endpoint_status["/health"] == HTTPStatus.OK,
+        "ready": not missing and not unexpected and endpoint_status["/ready"] == HTTPStatus.OK,
+    }
+
+
+def download_installed_backup(
+    install_root: Path,
+    *,
+    admin_username: str,
+    admin_password: str,
+    output_directory: Path,
+    transport: httpx.BaseTransport | None = None,
+) -> Path:
+    """Create an encrypted Runtime backup through the admin API and download it."""
+    release_directory, _manifest, base_url = _installed_release(install_root)
+    if output_directory.is_symlink():
+        raise PackageValidationError("Backup output directory must not be a symbolic link")
+    output_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    verify: bool | str = str(release_directory / "tls" / "server.crt") if transport is None else False
+    try:
+        with httpx.Client(
+            base_url=base_url,
+            verify=verify,
+            transport=transport,
+            timeout=120,
+            trust_env=False,
+        ) as client:
+            login = client.post(
+                "/api/v1/login",
+                data={"username": admin_username, "password": admin_password},
+            )
+            login.raise_for_status()
+            login_payload = login.json()
+            access_token = login_payload.get("access_token") if isinstance(login_payload, dict) else None
+            if not isinstance(access_token, str) or not access_token:
+                raise PackageValidationError("Runtime login returned an invalid token")
+            headers = {"Authorization": f"Bearer {access_token}"}
+            created = client.post("/api/v1/admin/backups", headers=headers)
+            created.raise_for_status()
+            backup = created.json()
+            if not isinstance(backup, dict):
+                raise PackageValidationError("Runtime backup response is invalid")
+            backup_id = backup.get("id")
+            checksum = backup.get("checksum")
+            size_bytes = backup.get("size_bytes")
+            if (
+                not isinstance(backup_id, str)
+                or not isinstance(checksum, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", checksum)
+                or not isinstance(size_bytes, int)
+                or isinstance(size_bytes, bool)
+                or size_bytes <= 0
+            ):
+                raise PackageValidationError("Runtime backup response is invalid")
+            try:
+                normalized_id = str(UUID(backup_id))
+            except ValueError as exc:
+                raise PackageValidationError("Runtime backup identifier is invalid") from exc
+            destination = output_directory.resolve() / f"{normalized_id}.unnest-backup"
+            descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            digest = hashlib.sha256()
+            received = 0
+            try:
+                with os.fdopen(descriptor, "wb") as output, client.stream(
+                    "GET",
+                    f"/api/v1/admin/backups/{normalized_id}/download",
+                    headers=headers,
+                ) as response:
+                    response.raise_for_status()
+                    for chunk in response.iter_bytes(1024 * 1024):
+                        received += len(chunk)
+                        if received > size_bytes:
+                            raise PackageValidationError("Runtime backup download is larger than declared")
+                        digest.update(chunk)
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+            except Exception:
+                destination.unlink(missing_ok=True)
+                raise
+    except httpx.HTTPError as exc:
+        raise PackageValidationError("Runtime backup API request failed") from exc
+    if received != size_bytes or digest.hexdigest() != checksum:
+        destination.unlink(missing_ok=True)
+        raise PackageValidationError("Runtime backup download failed integrity verification")
+    return destination
+
+
 def _contains_expected(actual: Any, expected: Any) -> bool:
     if isinstance(expected, dict):
         return isinstance(actual, dict) and all(
@@ -1112,6 +1312,38 @@ def install(
         )
         temporary_marker.replace(marker)
     typer.echo(f"installed; open https://{resolved_server_name}:7860/setup to complete initial setup")
+
+
+@app.command()
+def status(
+    install_root: Path = typer.Option(Path("/opt/unnest"), "--install-root"),
+) -> None:
+    result = inspect_installation(install_root)
+    typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if not result["healthy"]:
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def backup(
+    install_root: Path = typer.Option(Path("/opt/unnest"), "--install-root"),
+    admin_username: str = typer.Option(..., "--username", envvar="UNNEST_ADMIN_USERNAME"),
+    admin_password: str | None = typer.Option(
+        None,
+        "--admin-password",
+        envvar="UNNEST_ADMIN_PASSWORD",
+        hidden=True,
+    ),
+    output_directory: Path = typer.Option(Path(), "--output-dir"),
+) -> None:
+    password = admin_password or typer.prompt("Admin password", hide_input=True)
+    destination = download_installed_backup(
+        install_root,
+        admin_username=admin_username,
+        admin_password=password,
+        output_directory=output_directory,
+    )
+    typer.echo(f"backup saved: {destination}")
 
 
 @app.command()
