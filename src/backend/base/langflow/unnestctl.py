@@ -37,6 +37,10 @@ from langflow.services.deployment.offline_package import (
     CHECKSUM_SIGNATURE_FILE,
     sha256_file,
 )
+from langflow.services.deployment.source_documents import (
+    SourceDocumentError,
+    verify_bundled_source_documents,
+)
 from langflow.services.runtime_backup import RuntimeBackupError, restore_runtime_backup
 
 if TYPE_CHECKING:
@@ -425,6 +429,10 @@ def _validate_layout(package: Path, manifest: dict[str, Any], checked: set[str])
     try:
         verify_locked_wheels(package, manifest)
     except DependencyLockError as exc:
+        raise PackageValidationError(str(exc)) from exc
+    try:
+        verify_bundled_source_documents(package, manifest)
+    except SourceDocumentError as exc:
         raise PackageValidationError(str(exc)) from exc
 
 

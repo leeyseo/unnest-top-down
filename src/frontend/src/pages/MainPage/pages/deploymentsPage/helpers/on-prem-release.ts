@@ -4,6 +4,7 @@ export type OnPremWizardValues = {
   releaseVersion: string;
   agentFlowVersionId: string;
   ingestionFlowVersionId: string;
+  sourceFileIds: string[];
   orchestrator: "compose" | "helm";
   topology: "single" | "ha";
   architecture: "amd64" | "arm64";
@@ -41,6 +42,11 @@ export type OnPremWizardValues = {
   apiContract: string;
 };
 
+export type OnPremWizardUpdate = <K extends keyof OnPremWizardValues>(
+  key: K,
+  value: OnPremWizardValues[K],
+) => void;
+
 export const defaultApiContract = JSON.stringify(
   {
     input_schema: {
@@ -72,6 +78,7 @@ export const defaultOnPremWizardValues: OnPremWizardValues = {
   releaseVersion: "1.0.0",
   agentFlowVersionId: "",
   ingestionFlowVersionId: "",
+  sourceFileIds: [],
   orchestrator: "compose",
   topology: "single",
   architecture: "amd64",
@@ -83,7 +90,7 @@ export const defaultOnPremWizardValues: OnPremWizardValues = {
   includeModelWeights: false,
   storeConversations: false,
   conversationRetentionDays: 30,
-  tls: "institution",
+  tls: "self-signed",
   defaultLanguage: "ko",
   allowLanguageSwitch: true,
   solutionName: "Unnest",
@@ -122,6 +129,7 @@ export function buildOnPremReleasePayload(
     release_version: values.releaseVersion.trim(),
     agent_flow_version_id: values.agentFlowVersionId,
     ingestion_flow_version_id: values.ingestionFlowVersionId,
+    source_file_ids: values.sourceFileIds,
     config: {
       orchestrator: values.orchestrator,
       topology: values.topology,

@@ -2,6 +2,7 @@ export type OnPremReleasePayload = {
   release_version: string;
   agent_flow_version_id: string;
   ingestion_flow_version_id: string;
+  source_file_ids: string[];
   config: Record<string, unknown>;
   api: Record<string, unknown>;
   acceptance_tests: unknown[];
@@ -17,6 +18,7 @@ export type OnPremRelease = {
   id: string;
   release_version: string;
   api_version: string;
+  source_file_ids: string[];
   warnings: string[];
 };
 

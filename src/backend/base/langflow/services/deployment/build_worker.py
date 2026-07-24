@@ -11,17 +11,26 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from uuid import UUID
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, status
+import anyio
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from langflow.services.deployment.buildkit import WorkerArtifact, WorkerBuildStatus
 from langflow.services.deployment.manifest import canonical_digest
 from langflow.services.deployment.offline_dependencies import stage_locked_wheels, validated_dependency_lock
 from langflow.services.deployment.offline_package import create_reproducible_tar, sha256_file, write_checksums
+from langflow.services.deployment.source_documents import (
+    MAX_SOURCE_DOCUMENTS,
+    SourceDocumentError,
+    stage_source_documents,
+    validated_source_document_manifest,
+)
 from langflow.unnestctl import public_key_fingerprint, verify_license, verify_package
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -189,6 +198,7 @@ class BuildRequest(BaseModel):
             msg = "Risky Flow export requires the sandbox worker, which is not available"
             raise ValueError(msg)
         validated_dependency_lock(self.manifest)
+        validated_source_document_manifest(self.manifest)
         return self
 
 
@@ -359,7 +369,7 @@ class DockerImageBuildWorker:
             raise KeyError(msg) from exc
         return WorkerBuildStatus.model_validate(value)
 
-    def submit(self, request: BuildRequest) -> WorkerBuildStatus:
+    def submit(self, request: BuildRequest, source_documents: Path | None = None) -> WorkerBuildStatus:
         job = self._job(str(request.build_id))
         if (job / "status.json").is_file():
             current = self._status(str(request.build_id))
@@ -367,9 +377,14 @@ class DockerImageBuildWorker:
                 return current
             shutil.rmtree(job)
         job.mkdir(parents=True)
-        self._write_json(job / "request.json", request.model_dump(mode="json"))
-        queued = WorkerBuildStatus(job_id=str(request.build_id), status="queued")
-        self._write_json(job / "status.json", queued.model_dump(mode="json"))
+        try:
+            stage_source_documents(source_documents, job / "source-bundle", request.manifest)
+            self._write_json(job / "request.json", request.model_dump(mode="json"))
+            queued = WorkerBuildStatus(job_id=str(request.build_id), status="queued")
+            self._write_json(job / "status.json", queued.model_dump(mode="json"))
+        except Exception:
+            shutil.rmtree(job)
+            raise
         return queued
 
     def _run(self, command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> str:
@@ -396,6 +411,7 @@ class DockerImageBuildWorker:
         for flow in request.flows:
             self._write_json(release / "flows" / f"{flow.version_id}.json", flow.data)
         shutil.copytree(job / "locked-wheels", release / "wheels")
+        shutil.copytree(job / "source-bundle" / "documents", release / "documents")
 
         materials = context / "bundle"
         for relative in ("license/license.json", "license/license.sig"):
@@ -540,6 +556,7 @@ class DockerImageBuildWorker:
         for flow in request.flows:
             self._write_json(package / "flows" / f"{flow.version_id}.json", flow.data)
         shutil.copytree(job / "locked-wheels", package / "wheels")
+        shutil.copytree(job / "source-bundle" / "documents", package / "documents")
 
         compose = _COMPOSE_TEMPLATE.format(
             postgres_image=_image_tag(self.config.postgres_image),
@@ -802,9 +819,83 @@ def create_build_worker_app(worker: DockerImageBuildWorker | None = None) -> Fas
     build_worker = worker or DockerImageBuildWorker(BuildWorkerConfig.from_env())
     app = FastAPI(title="Unnest Build Worker", docs_url=None, redoc_url=None)
 
+    async def multipart_build_request(http_request: Request) -> tuple[BuildRequest, Path]:
+        temporary = TemporaryDirectory(prefix="unnest-build-upload-")
+        root = Path(temporary.name)
+        http_request.state.source_document_temporary = temporary
+        async with http_request.form(
+            max_files=MAX_SOURCE_DOCUMENTS,
+            max_fields=1,
+            max_part_size=16 * 1024**2,
+        ) as form:
+            raw_request = form.get("request")
+            if not isinstance(raw_request, str):
+                msg = "Multipart build request is missing its JSON contract"
+                raise SourceDocumentError(msg)
+            request = BuildRequest.model_validate_json(raw_request)
+            expected = {
+                str(entry["id"]): entry
+                for entry in validated_source_document_manifest(request.manifest)
+            }
+            uploads = form.getlist("documents")
+            if len(uploads) != len(expected):
+                msg = "Uploaded source documents do not match the release manifest"
+                raise SourceDocumentError(msg)
+            seen: set[str] = set()
+            for upload in uploads:
+                if not isinstance(upload, StarletteUploadFile):
+                    msg = "Multipart build document is invalid"
+                    raise SourceDocumentError(msg)
+                try:
+                    document_id = str(UUID(str(upload.filename)))
+                except ValueError as exc:
+                    msg = "Multipart build document id is invalid"
+                    raise SourceDocumentError(msg) from exc
+                if document_id in seen or document_id not in expected:
+                    msg = "Multipart build documents contain an unexpected id"
+                    raise SourceDocumentError(msg)
+                seen.add(document_id)
+                expected_size = int(expected[document_id]["size_bytes"])
+                if upload.size is not None and upload.size != expected_size:
+                    msg = f"Uploaded source document size is invalid: {document_id}"
+                    raise SourceDocumentError(msg)
+                size = 0
+                output = await anyio.open_file(root / document_id, "xb")
+                try:
+                    while chunk := await upload.read(1024 * 1024):
+                        size += len(chunk)
+                        if size > expected_size:
+                            msg = f"Uploaded source document is too large: {document_id}"
+                            raise SourceDocumentError(msg)
+                        await output.write(chunk)
+                finally:
+                    await output.aclose()
+                if size != expected_size:
+                    msg = f"Uploaded source document is truncated: {document_id}"
+                    raise SourceDocumentError(msg)
+        return request, root
+
     @app.post("/v1/builds", response_model=WorkerBuildStatus, status_code=status.HTTP_202_ACCEPTED)
-    async def submit(request: BuildRequest, background: BackgroundTasks) -> WorkerBuildStatus:
-        result = build_worker.submit(request)
+    async def submit(http_request: Request, background: BackgroundTasks) -> WorkerBuildStatus:
+        temporary: TemporaryDirectory | None = None
+        try:
+            if http_request.headers.get("content-type", "").startswith("multipart/form-data"):
+                request, source_documents = await multipart_build_request(http_request)
+                temporary = http_request.state.source_document_temporary
+            else:
+                request = BuildRequest.model_validate(await http_request.json())
+                source_documents = None
+            result = build_worker.submit(request, source_documents)
+        except (OSError, SourceDocumentError, ValidationError, ValueError) as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        finally:
+            upload_temporary = temporary or getattr(
+                http_request.state,
+                "source_document_temporary",
+                None,
+            )
+            if upload_temporary is not None:
+                upload_temporary.cleanup()
         if result.status == "queued":
             background.add_task(build_worker.run, result.job_id)
         return result

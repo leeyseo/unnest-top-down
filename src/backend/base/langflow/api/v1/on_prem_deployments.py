@@ -5,10 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Annotated
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select
@@ -42,6 +43,13 @@ from langflow.services.deployment import (
     analyze_release,
     sanitize_flow_for_build,
 )
+from langflow.services.deployment.source_documents import (
+    SourceDocumentError,
+    materialize_source_documents,
+    snapshot_source_documents,
+)
+from langflow.services.deps import get_storage_service
+from langflow.services.storage.service import StorageService
 
 router = APIRouter(prefix="/deployments/on-prem/releases", tags=["On-premise Deployments"])
 MAX_OFFLINE_PACKAGE_SIZE = 50 * 1024**3
@@ -55,6 +63,11 @@ def _to_read(release: DeploymentRelease, *, warnings: list[str] | None = None) -
         agent_flow_version_id=release.agent_flow_version_id,
         ingestion_flow_version_id=release.ingestion_flow_version_id,
         subflow_version_ids=[UUID(value) for value in release.subflow_version_ids],
+        source_file_ids=[
+            UUID(str(entry["id"]))
+            for entry in release.manifest.get("source_documents", [])
+            if isinstance(entry, dict) and entry.get("id")
+        ],
         config=release.config,
         manifest=release.manifest,
         warnings=warnings or [],
@@ -223,7 +236,14 @@ async def _analyze(
     session: DbSession | DbSessionReadOnly,
     current_user: CurrentActiveUser,
     payload: OnPremReleaseCreateRequest,
+    storage_service: StorageService,
 ):
+    source_documents = await snapshot_source_documents(
+        session,
+        storage_service,
+        user_id=current_user.id,
+        file_ids=payload.source_file_ids,
+    )
     return await analyze_release(
         session,
         user_id=current_user.id,
@@ -232,6 +252,8 @@ async def _analyze(
         ingestion_flow_version_id=payload.ingestion_flow_version_id,
         config=payload.config,
         api=payload.api,
+        source_documents=list(source_documents.documents),
+        source_document_errors=list(source_documents.errors),
         acceptance_tests=payload.acceptance_tests,
         previous_manifest=await _latest_manifest(session, current_user.id),
     )
@@ -242,8 +264,9 @@ async def validate_release(
     payload: OnPremReleaseCreateRequest,
     session: DbSessionReadOnly,
     current_user: CurrentActiveUser,
+    storage_service: Annotated[StorageService, Depends(get_storage_service)],
 ) -> OnPremReleaseValidationResponse:
-    analysis = await _analyze(session, current_user, payload)
+    analysis = await _analyze(session, current_user, payload, storage_service)
     return OnPremReleaseValidationResponse(
         manifest=analysis.manifest,
         errors=list(analysis.errors),
@@ -256,6 +279,7 @@ async def create_release(
     payload: OnPremReleaseCreateRequest,
     session: DbSession,
     current_user: CurrentActiveUser,
+    storage_service: Annotated[StorageService, Depends(get_storage_service)],
 ) -> OnPremReleaseRead:
     existing = (
         await session.exec(
@@ -268,7 +292,7 @@ async def create_release(
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Release version already exists")
 
-    analysis = await _analyze(session, current_user, payload)
+    analysis = await _analyze(session, current_user, payload, storage_service)
     if analysis.errors or analysis.manifest is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -362,6 +386,7 @@ async def submit_build(
     build_id: UUID,
     session: DbSession,
     current_user: CurrentActiveUser,
+    storage_service: Annotated[StorageService, Depends(get_storage_service)],
 ) -> DeploymentBuildRead:
     release, build = await _owned_build(
         session,
@@ -402,9 +427,19 @@ async def submit_build(
         "reproducible": {"source_date_epoch": 0, "sort_files": True},
     }
     try:
-        async with _worker_client_or_503() as client:
-            worker = await client.submit(payload)
-    except httpx.HTTPError as exc:
+        with TemporaryDirectory(prefix="unnest-source-documents-") as temporary:
+            documents = await materialize_source_documents(
+                session,
+                storage_service,
+                user_id=release.user_id,
+                manifest=release.manifest,
+                destination=Path(temporary) / "documents",
+            )
+            async with _worker_client_or_503() as client:
+                worker = await client.submit(payload, documents)
+    except SourceDocumentError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (httpx.HTTPError, OSError) as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="BuildKit worker request failed") from exc
     await _apply_worker_status(session, release=release, build=build, worker=worker)
     await session.flush()

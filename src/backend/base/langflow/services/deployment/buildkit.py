@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -95,7 +97,7 @@ class BuildKitWorkerClient:
             base_url=self.base_url,
             verify=str(ca),
             cert=(str(cert), str(key)),
-            timeout=httpx.Timeout(30, read=60),
+            timeout=httpx.Timeout(30, read=3600, write=3600),
         )
 
     @classmethod
@@ -125,8 +127,27 @@ class BuildKitWorkerClient:
     async def __aexit__(self, *_args: object) -> None:
         await self._client.aclose()
 
-    async def submit(self, payload: dict[str, Any]) -> WorkerBuildStatus:
-        response = await self._client.post("/v1/builds", json=payload)
+    async def submit(
+        self,
+        payload: dict[str, Any],
+        source_documents: list[tuple[str, Path]] | None = None,
+    ) -> WorkerBuildStatus:
+        if source_documents:
+            with ExitStack() as stack:
+                files = [
+                    (
+                        "documents",
+                        (document_id, stack.enter_context(path.open("rb")), "application/octet-stream"),
+                    )
+                    for document_id, path in source_documents
+                ]
+                response = await self._client.post(
+                    "/v1/builds",
+                    data={"request": json.dumps(payload, separators=(",", ":"), sort_keys=True)},
+                    files=files,
+                )
+        else:
+            response = await self._client.post("/v1/builds", json=payload)
         response.raise_for_status()
         return WorkerBuildStatus.model_validate(response.json())
 

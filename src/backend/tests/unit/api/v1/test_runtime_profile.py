@@ -1,13 +1,14 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException, Request
 from langflow.api.v1.runtime import (
     _apply_active_index_tweaks,
     _apply_conversation_policy,
+    _bundled_source_documents_ready,
     _contract_input,
     _contract_output,
     _immutable_agent_flow,
@@ -75,6 +76,38 @@ def test_runtime_profile_mounts_only_deployment_routes(monkeypatch):
     )
     assert settings.do_not_track is True
     assert settings.deactivate_tracing is True
+
+
+async def test_bundled_documents_block_runtime_until_indexing_is_active(async_session):
+    source_id = uuid4()
+    user = User(username="bundled-document-owner", password="unused", is_active=True)  # noqa: S106
+    knowledge_base = KnowledgeBaseRecord(name="shared", user_id=user.id)
+    release = DeploymentRelease(
+        user_id=user.id,
+        version="1.0.0",
+        agent_flow_version_id=uuid4(),
+        ingestion_flow_version_id=uuid4(),
+        config={},
+        manifest={"source_documents": [{"id": str(source_id)}]},
+        api_version="v1",
+    )
+    document = RuntimeDocument(
+        id=uuid5(release.id, str(source_id)),
+        user_id=user.id,
+        knowledge_base_id=knowledge_base.id,
+        name="guide.txt",
+        status="pending",
+    )
+    async_session.add_all([user, knowledge_base, document])
+    await async_session.flush()
+
+    assert await _bundled_source_documents_ready(async_session, release) is False
+
+    document.status = "active"
+    async_session.add(document)
+    await async_session.flush()
+
+    assert await _bundled_source_documents_ready(async_session, release) is True
 
 
 async def test_runtime_executes_release_snapshot_not_editable_draft(async_session, monkeypatch):

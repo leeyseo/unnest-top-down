@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
+import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -16,9 +17,12 @@ from langflow.services.deployment.build_worker import (
     BuildRequest,
     BuildWorkerConfig,
     DockerImageBuildWorker,
+    create_build_worker_app,
 )
+from langflow.services.deployment.buildkit import BuildKitWorkerClient, WorkerBuildStatus
 from langflow.services.deployment.manifest import canonical_digest
 from langflow.services.deployment.offline_dependencies import DependencyLockError, stage_locked_wheels
+from langflow.services.deployment.source_documents import SourceDocumentError
 
 
 def test_release_uses_configured_pinned_base_image(monkeypatch):
@@ -36,6 +40,51 @@ def test_build_request_rejects_dependency_lock_not_declared_by_flows():
 
     with pytest.raises(ValueError, match="does not match the immutable Flow declarations"):
         BuildRequest.model_validate(request)
+
+
+async def test_mtls_client_and_worker_transfer_source_documents_as_multipart(tmp_path):
+    source_id = uuid4()
+    contents = b"source bytes crossing the control-plane worker boundary"
+    source = tmp_path / "source"
+    source.write_bytes(contents)
+    request = _request(uuid4(), f"sha256:{'a' * 64}")
+    request.manifest["source_documents"] = [
+        {
+            "id": str(source_id),
+            "name": "guide.txt",
+            "size_bytes": len(contents),
+            "digest": f"sha256:{hashlib.sha256(contents).hexdigest()}",
+            "mime_type": "text/plain",
+            "package_path": f"documents/source/{source_id}/guide.txt",
+        }
+    ]
+
+    class Worker:
+        received: tuple[str, bytes] | None = None
+
+        def submit(self, submitted, source_documents):
+            assert submitted == request
+            path = source_documents / str(source_id)
+            self.received = (path.name, path.read_bytes())
+            return WorkerBuildStatus(job_id=str(submitted.build_id), status="failed", logs="test stop")
+
+    worker = Worker()
+    http_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=create_build_worker_app(worker)),  # type: ignore[arg-type]
+        base_url="https://worker.internal",
+    )
+    client = object.__new__(BuildKitWorkerClient)
+    client._client = http_client
+    try:
+        result = await client.submit(
+            request.model_dump(mode="json"),
+            [(str(source_id), source)],
+        )
+    finally:
+        await http_client.aclose()
+
+    assert result.status == "failed"
+    assert worker.received == (str(source_id), contents)
 
 
 def _license_materials(root: Path, release_digest: str) -> tuple[Path, Path]:
@@ -152,6 +201,21 @@ def _request(build_id, base_digest: str) -> BuildRequest:
 def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
     digest = f"sha256:{'a' * 64}"
     first_request = _request(uuid4(), digest)
+    source_id = uuid4()
+    source_contents = b"government deployment source document"
+    source_uploads = tmp_path / "source-uploads"
+    source_uploads.mkdir()
+    (source_uploads / str(source_id)).write_bytes(source_contents)
+    first_request.manifest["source_documents"] = [
+        {
+            "id": str(source_id),
+            "name": "guide.txt",
+            "size_bytes": len(source_contents),
+            "digest": f"sha256:{hashlib.sha256(source_contents).hexdigest()}",
+            "mime_type": "text/plain",
+            "package_path": f"documents/source/{source_id}/guide.txt",
+        }
+    ]
     wheelhouse = tmp_path / "wheelhouse"
     wheelhouse.mkdir()
     wheel = wheelhouse / "agency_sdk-1.2.3-py3-none-any.whl"
@@ -231,12 +295,12 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
         return ""
 
     monkeypatch.setattr(worker, "_run", fake_run)
-    worker.submit(first_request)
+    worker.submit(first_request, source_uploads)
     worker.run(str(first_request.build_id))
     first = worker._status(str(first_request.build_id))
 
     second_request = first_request.model_copy(update={"build_id": uuid4()})
-    worker.submit(second_request)
+    worker.submit(second_request, source_uploads)
     worker.run(str(second_request.build_id))
     second = worker._status(str(second_request.build_id))
 
@@ -251,6 +315,7 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
             "signatures/checksums.sig",
             "wheels/agency_sdk-1.2.3-py3-none-any.whl",
             "wheels/requirements.lock",
+            f"documents/source/{source_id}/guide.txt",
         }.issubset(names)
     assert [command[0] for command in commands].count("buildctl") == 2
     assert [command[0] for command in commands].count("trivy") == 12
@@ -259,6 +324,12 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
     assert worker._scan_findings(
         {"Results": [{"Secrets": [{"Severity": "HIGH", "RuleID": "embedded-api-key"}]}]}
     ) == ["secret:embedded-api-key"]
+
+    (source_uploads / str(source_id)).write_bytes(b"tampered")
+    tampered_request = first_request.model_copy(update={"build_id": uuid4()})
+    with pytest.raises(SourceDocumentError, match="does not match its snapshot"):
+        worker.submit(tampered_request, source_uploads)
+    assert not (config.root / str(tampered_request.build_id)).exists()
 
     missing_request = first_request.model_copy(deep=True)
     missing_hash = f"sha256:{'e' * 64}"

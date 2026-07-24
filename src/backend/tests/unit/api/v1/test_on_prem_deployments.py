@@ -181,7 +181,16 @@ async def test_create_on_prem_release_from_saved_versions(
 ):
     logged_in_headers = logged_in_headers_super_user
     agent_version_id, ingestion_version_id = await _root_versions(client, logged_in_headers)
+    source_contents = b"source document selected by the SI release author"
+    uploaded = await client.post(
+        "/api/v2/files/",
+        headers=logged_in_headers,
+        files={"file": ("guide.txt", source_contents, "text/plain")},
+    )
+    assert uploaded.status_code == status.HTTP_201_CREATED
+    source_file_id = uploaded.json()["id"]
     payload = _release_payload(agent_version_id, ingestion_version_id)
+    payload["source_file_ids"] = [source_file_id]
 
     response = await client.post(
         "/api/v1/deployments/on-prem/releases",
@@ -196,6 +205,17 @@ async def test_create_on_prem_release_from_saved_versions(
     assert body["manifest"]["provider"] == "unnest-on-prem"
     assert [flow["role"] for flow in body["manifest"]["flows"]] == ["agent", "ingestion"]
     assert body["manifest"]["secret_names"] == []
+    assert body["source_file_ids"] == [source_file_id]
+    assert body["manifest"]["source_documents"] == [
+        {
+            "id": source_file_id,
+            "name": "guide.txt",
+            "size_bytes": len(source_contents),
+            "digest": f"sha256:{hashlib.sha256(source_contents).hexdigest()}",
+            "mime_type": "text/plain",
+            "package_path": f"documents/source/{source_file_id}/guide.txt",
+        }
+    ]
     assert set(body["manifest"]["services"]) == {"runtime", "redis", "postgresql"}
     assert {
         "service": "runtime",
@@ -240,8 +260,12 @@ async def test_create_on_prem_release_from_saved_versions(
         async def __aexit__(self, *_args):
             return None
 
-        async def submit(self, submitted):
+        async def submit(self, submitted, source_documents=None):
             self.payload = submitted
+            assert source_documents is not None
+            assert [(document_id, path.read_bytes()) for document_id, path in source_documents] == [
+                (source_file_id, source_contents)
+            ]
             return WorkerBuildStatus(job_id=submitted["build_id"], status="queued")
 
         async def get(self, _job_id):

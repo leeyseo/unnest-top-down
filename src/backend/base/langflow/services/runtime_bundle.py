@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
+import anyio
 from sqlalchemy import text
 from sqlmodel import select
 
@@ -18,9 +19,11 @@ from langflow.services.database.models.deployment_release.model import (
 from langflow.services.database.models.flow.model import Flow
 from langflow.services.database.models.flow_version.model import FlowVersion
 from langflow.services.database.models.knowledge_base.model import KnowledgeBaseRecord
+from langflow.services.database.models.runtime_document import DocumentVersion, RuntimeDocument
 from langflow.services.database.models.user.model import User
 from langflow.services.deployment.manifest import canonical_digest
-from langflow.services.deps import session_scope
+from langflow.services.deployment.source_documents import verify_bundled_source_documents
+from langflow.services.deps import get_storage_service, session_scope
 
 _OWNER_ID = UUID("48b64f8d-04ca-5b61-bfd5-b0c7e5d20d22")
 _OWNER_NAME = "__unnest_runtime__"
@@ -60,6 +63,7 @@ def _load_bundle(root: Path) -> tuple[dict, dict[str, dict]]:
             msg = f"Bundled Flow Version digest mismatch: {version_id}"
             raise RuntimeError(msg)
         flows[version_id] = data
+    verify_bundled_source_documents(root, manifest)
     return manifest, flows
 
 
@@ -188,5 +192,65 @@ async def load_bundled_runtime_release() -> bool:
                 )
             ).first()
             if knowledge_base is None:
-                session.add(KnowledgeBaseRecord(name=alias, user_id=owner.id))
+                knowledge_base = KnowledgeBaseRecord(name=alias, user_id=owner.id)
+                session.add(knowledge_base)
+                await session.flush()
+            bundled_sources = manifest.get("source_documents", [])
+            storage = get_storage_service() if bundled_sources else None
+            for source in bundled_sources:
+                if storage is None:
+                    msg = "Runtime storage is unavailable for bundled source documents"
+                    raise RuntimeError(msg)
+                source_id = str(source["id"])
+                document_id = uuid5(release.id, source_id)
+                version_id = uuid5(document_id, "v1")
+                document = await session.get(RuntimeDocument, document_id)
+                version = await session.get(DocumentVersion, version_id)
+                if document is not None or version is not None:
+                    if (
+                        document is None
+                        or version is None
+                        or version.checksum != source["digest"]
+                        or version.document_id != document.id
+                    ):
+                        msg = f"Bundled source document already exists with different content: {source_id}"
+                        raise RuntimeError(msg)
+                    continue
+                storage_name = f"{document_id.hex}.source"
+                source_path = root / str(source["package_path"])
+                first_chunk = True
+                async with await anyio.open_file(source_path, "rb") as bundled:
+                    while chunk := await bundled.read(1024 * 1024):
+                        await storage.save_file(
+                            "runtime-documents",
+                            storage_name,
+                            chunk,
+                            append=not first_chunk,
+                        )
+                        first_chunk = False
+                session.add(
+                    RuntimeDocument(
+                        id=document_id,
+                        user_id=owner.id,
+                        knowledge_base_id=knowledge_base.id,
+                        name=str(source["name"]),
+                        status="pending",
+                    )
+                )
+                session.add(
+                    DocumentVersion(
+                        id=version_id,
+                        document_id=document_id,
+                        version_number=1,
+                        checksum=str(source["digest"]),
+                        mime_type=str(source["mime_type"]),
+                        size_bytes=int(source["size_bytes"]),
+                        storage_path=f"runtime-documents/{storage_name}",
+                        document_metadata={
+                            "bundled_source_id": source_id,
+                            "release_digest": str(manifest["release_digest"]),
+                        },
+                        status="pending",
+                    )
+                )
     return True

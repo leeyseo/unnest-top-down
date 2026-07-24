@@ -58,8 +58,11 @@ def _write_signed_package(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     ingestion_digest = hashlib.sha256(
         json.dumps(ingestion_flow, separators=(",", ":"), sort_keys=True).encode()
     ).hexdigest()
+    source_id = "550e8400-e29b-41d4-a716-446655440000"
+    source_contents = b"bundled source document"
     files = {
         "compose/compose.yml": b"services: {}\n",
+        f"documents/source/{source_id}/guide.txt": source_contents,
         "flows/agent-version.json": json.dumps(agent_flow, sort_keys=True).encode(),
         "flows/ingestion-version.json": json.dumps(ingestion_flow, sort_keys=True).encode(),
         "images/unnest-runtime.tar": b"runtime image",
@@ -137,6 +140,16 @@ def _write_signed_package(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             )
         ],
         "sandbox": {"required": False},
+        "source_documents": [
+            {
+                "id": source_id,
+                "name": "guide.txt",
+                "size_bytes": len(source_contents),
+                "digest": f"sha256:{hashlib.sha256(source_contents).hexdigest()}",
+                "mime_type": "text/plain",
+                "package_path": f"documents/source/{source_id}/guide.txt",
+            }
+        ],
         "external_endpoints": [],
         "dependency_lock": {"python_packages": [], "os_packages": [], "binaries": []},
         "acceptance_tests": json.loads(files["tests/acceptance.json"]),

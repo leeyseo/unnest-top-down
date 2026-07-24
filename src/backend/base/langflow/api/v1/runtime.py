@@ -19,7 +19,7 @@ from http import HTTPStatus
 from pathlib import Path
 from struct import pack
 from typing import Annotated, Any, Literal
-from uuid import UUID, uuid4
+from uuid import UUID, uuid4, uuid5
 
 import filetype
 import httpx
@@ -331,6 +331,32 @@ async def _setup_complete(session: DbSessionReadOnly) -> bool:
     return bool(configuration and configuration.setup_complete)
 
 
+async def _bundled_source_documents_ready(
+    session: DbSessionReadOnly,
+    release: DeploymentRelease,
+) -> bool:
+    entries = release.manifest.get("source_documents", [])
+    if not isinstance(entries, list):
+        return False
+    if not entries:
+        return True
+    try:
+        document_ids = [uuid5(release.id, str(entry["id"])) for entry in entries if isinstance(entry, dict)]
+    except KeyError:
+        return False
+    if len(document_ids) != len(entries):
+        return False
+    active = (
+        await session.exec(
+            select(RuntimeDocument.id).where(
+                RuntimeDocument.id.in_(document_ids),
+                RuntimeDocument.status == "active",
+            )
+        )
+    ).all()
+    return len(active) == len(document_ids)
+
+
 async def _release_for_api(session: DbSessionReadOnly, api_version: str | None = None) -> DeploymentRelease:
     if not await _setup_complete(session):
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Initial setup is incomplete")
@@ -340,6 +366,11 @@ async def _release_for_api(session: DbSessionReadOnly, api_version: str | None =
     release = (await session.exec(statement.order_by(col(DeploymentRelease.created_at).desc()))).first()
     if release is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Runtime API version not found")
+    if not await _bundled_source_documents_ready(session, release):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Bundled source document indexing is incomplete",
+        )
     return release
 
 
@@ -1219,6 +1250,9 @@ async def runtime_setup_status(session: DbSessionReadOnly) -> dict[str, Any]:
         "default_language": release.config.get("default_language", "ko") if release else "ko",
         "allow_language_switch": release.config.get("allow_language_switch", True) if release else True,
         "license": runtime_license_status(str(release.manifest.get("release_digest") or "") if release else None),
+        "bundled_documents_ready": (
+            await _bundled_source_documents_ready(session, release) if release is not None else False
+        ),
         "required_secret_names": required_secrets if isinstance(required_secrets, list) else [],
         "configured_secret_names": sorted(
             configuration.settings.get("secret_names", []) if configuration else []
@@ -1229,6 +1263,7 @@ async def runtime_setup_status(session: DbSessionReadOnly) -> dict[str, Any]:
 @router.post("/api/v1/setup", status_code=status.HTTP_201_CREATED)
 async def complete_runtime_setup(
     payload: RuntimeSetupRequest,
+    background_tasks: BackgroundTasks,
     session: DbSession,
 ) -> dict[str, Any]:
     if await session.get(RuntimeConfiguration, 1):
@@ -1268,6 +1303,36 @@ async def complete_runtime_setup(
     if (await session.exec(select(User.id).where(User.username == username))).first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
 
+    bundled_sources = release.manifest.get("source_documents", [])
+    if not isinstance(bundled_sources, list):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Bundled source document manifest is invalid",
+        )
+    ingestion_version = await session.get(FlowVersion, release.ingestion_flow_version_id) if bundled_sources else None
+    if bundled_sources and ingestion_version is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Immutable Ingestion Flow Version is unavailable",
+        )
+    bundled_records: list[tuple[RuntimeDocument, DocumentVersion]] = []
+    for source in bundled_sources:
+        try:
+            document_id = uuid5(release.id, str(source["id"]))
+        except (KeyError, TypeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Bundled source document manifest is invalid",
+            ) from exc
+        document = await session.get(RuntimeDocument, document_id)
+        version = await session.get(DocumentVersion, uuid5(document_id, "v1"))
+        if document is None or version is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Bundled source document is unavailable: {source['id']}",
+            )
+        bundled_records.append((document, version))
+
     try:
         key = load_or_create_master_key()
     except (OSError, ValueError) as exc:
@@ -1302,6 +1367,37 @@ async def complete_runtime_setup(
         )
         session.add(configuration)
         await session.flush()
+        bundled_jobs: list[tuple[RuntimeDocument, DocumentVersion, UUID]] = []
+        for document, version in bundled_records:
+            if ingestion_version is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Immutable Ingestion Flow Version is unavailable",
+                )
+            if document.status == "active":
+                continue
+            job_id = uuid4()
+            session.add(
+                Job(
+                    job_id=job_id,
+                    flow_id=ingestion_version.flow_id,
+                    status=JobStatus.QUEUED,
+                    type=JobType.INGESTION,
+                    user_id=release.user_id,
+                    asset_id=document.id,
+                    asset_type="runtime_document",
+                    job_metadata={
+                        "stage": "queued",
+                        "progress": 0,
+                        "document_id": str(document.id),
+                        "version_id": str(version.id),
+                        "release_id": str(release.id),
+                        "bundled": True,
+                    },
+                )
+            )
+            bundled_jobs.append((document, version, job_id))
+        await session.flush()
     except IntegrityError as exc:
         await session.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Initial setup is already complete") from exc
@@ -1315,10 +1411,21 @@ async def complete_runtime_setup(
             "release_version": release.version,
             "secret_names": sorted(secrets),
             "tls_certificate_configured": payload.tls_certificate_configured,
+            "bundled_document_jobs": len(bundled_jobs),
         },
     )
+    for document, version, job_id in bundled_jobs:
+        background_tasks.add_task(
+            _schedule_runtime_ingestion,
+            release_id=release.id,
+            document_id=document.id,
+            version_id=version.id,
+            user_id=release.user_id,
+            job_id=job_id,
+        )
     result = await runtime_setup_status(session)
     result["recovery_identity"] = recovery_identity
+    result["bundled_ingestion_job_ids"] = [str(job_id) for _document, _version, job_id in bundled_jobs]
     return result
 
 

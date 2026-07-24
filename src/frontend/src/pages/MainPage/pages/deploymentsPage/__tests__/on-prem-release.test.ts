@@ -9,6 +9,7 @@ describe("on-prem release payload", () => {
       ...defaultOnPremWizardValues,
       agentFlowVersionId: "agent-version",
       ingestionFlowVersionId: "ingestion-version",
+      sourceFileIds: ["source-1", "source-2"],
       accelerator: "nvidia",
       gpuCount: 2,
       storeConversations: true,
@@ -27,6 +28,7 @@ describe("on-prem release payload", () => {
 
     expect(payload.agent_flow_version_id).toBe("agent-version");
     expect(payload.ingestion_flow_version_id).toBe("ingestion-version");
+    expect(payload.source_file_ids).toEqual(["source-1", "source-2"]);
     expect(payload.config).toMatchObject({
       accelerator: "nvidia",
       conversation_retention_days: 30,
@@ -42,6 +44,7 @@ describe("on-prem release payload", () => {
     const payload = buildOnPremReleasePayload(defaultOnPremWizardValues);
 
     expect(payload.config).toMatchObject({
+      tls: "self-signed",
       store_conversations: false,
       conversation_retention_days: null,
       resources: { gpu_count: 0 },

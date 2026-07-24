@@ -187,6 +187,7 @@ class OnPremReleaseCreateRequest(BaseModel):
     release_version: SemVer
     agent_flow_version_id: UUID
     ingestion_flow_version_id: UUID
+    source_file_ids: list[UUID] = Field(default_factory=list, max_length=1000)
     config: OnPremDeploymentConfig = Field(default_factory=OnPremDeploymentConfig)
     api: AgentApiContract
     acceptance_tests: list[AcceptanceTestCreate] = Field(default_factory=list, max_length=100)
@@ -206,6 +207,7 @@ class OnPremReleaseRead(BaseModel):
     agent_flow_version_id: UUID
     ingestion_flow_version_id: UUID
     subflow_version_ids: list[UUID]
+    source_file_ids: list[UUID]
     config: dict[str, Any]
     manifest: dict[str, Any]
     warnings: list[str] = Field(default_factory=list)

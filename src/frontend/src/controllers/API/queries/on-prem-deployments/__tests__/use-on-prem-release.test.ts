@@ -39,6 +39,7 @@ const payload = {
   release_version: "1.0.0",
   agent_flow_version_id: "agent",
   ingestion_flow_version_id: "ingestion",
+  source_file_ids: [],
   config: {},
   api: {},
   acceptance_tests: [],

@@ -13,10 +13,10 @@ server, completes setup in a browser, and runs both safe and sandboxed flows
 without transferring runtime data to the SI network.
 
 The current layout-v2 checkpoint implements the signed safe-Flow package,
-installer, and hash-locked Python wheel bundle. It deliberately blocks risky
-Flows and bundled source documents until the later sandbox and document
-checkpoints are implemented. Those blocked features remain part of this final
-definition of done.
+installer, hash-locked Python wheel bundle, and immutable source-document
+bundle. It deliberately blocks risky Flows until the sandbox checkpoint is
+implemented. That blocked feature remains part of this final definition of
+done.
 
 ## Supported profile
 
@@ -81,6 +81,7 @@ unnest-<release>-rocky9-amd64.tar
 ├── flows/<flow-version-id>.json
 ├── wheels/requirements.lock
 ├── wheels/<locked-package>.whl
+├── documents/source/<source-file-id>/<original-filename>
 ├── images/unnest-runtime.tar
 ├── images/postgresql.tar
 ├── images/redis.tar
@@ -159,13 +160,27 @@ proxy. Internet access and undeclared internal addresses are blocked.
 
 ## Bundled documents
 
-SI-provided source documents are always included under `documents/source/`.
+The SI release author explicitly selects files already owned by their Unnest
+account. Release creation snapshots each selected file's ID, original filename,
+size, MIME type, and SHA-256 digest. Build submission re-reads the SI-side
+storage object and rejects a missing, renamed, resized, or modified file before
+transferring it to the mTLS-authenticated Build Worker. The worker independently
+verifies the exact file set, size, and digest before including it under
+`documents/source/` in both the Runtime image and the outer release package.
+
+Government runtime files never travel back to the SI through MCP. On first
+government-local startup, the Runtime verifies the signed bundle, copies each
+source document into its local storage, and creates deterministic pending
+document versions. Completing initial setup queues the immutable Ingestion Flow
+for those documents.
+
 Prebuilt indexes are not included in the MVP. After the government-internal
 model endpoint is configured, the Runtime builds a new local index from the
-source documents and exposes progress and item-level errors.
+source documents and exposes the existing ingestion job state.
 
-The Agent API remains unavailable until all required source documents are
-indexed and required acceptance tests pass.
+The Agent API and `/ready` remain unavailable until every bundled source
+document becomes active. Required acceptance-test gating remains part of the
+final offline acceptance checkpoint.
 
 ## First-run setup
 
@@ -184,8 +199,9 @@ responses. The setup UI collects:
 4. an optional institution TLS certificate and key; and
 5. confirmation that the one-time backup recovery identity was downloaded.
 
-Setup then starts bundled-document indexing and required acceptance tests. The
-Agent API becomes ready only after both succeed.
+Setup then starts bundled-document indexing. The Agent API becomes ready only
+after indexing succeeds. Automatic required acceptance-test gating is completed
+in the final offline acceptance checkpoint.
 
 ## Installer commands
 
@@ -242,7 +258,8 @@ begins.
    - Apply `backend-code-review` and `.agents/skills/e2e-testing`.
 3. **Locked wheel bundle and source documents**
    - Install only the wheels and documents recorded in the manifest.
-   - Apply `backend-code-review` and `e2e-testing`.
+   - Apply `backend-code-review`; reserve Playwright `e2e-testing` for the
+     Wizard/UI checkpoint.
 4. **Sandbox worker and allowlist proxy**
    - Prove isolation with adversarial tests.
    - Apply `backend-code-review` and `e2e-testing`.

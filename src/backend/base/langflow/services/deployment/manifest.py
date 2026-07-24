@@ -665,6 +665,8 @@ async def analyze_release(
     ingestion_flow_version_id: UUID,
     config: OnPremDeploymentConfig,
     api: AgentApiContract,
+    source_documents: list[dict[str, Any]] | None = None,
+    source_document_errors: list[str] | None = None,
     acceptance_tests: list[AcceptanceTestCreate] | None = None,
     previous_manifest: dict[str, Any] | None = None,
 ) -> ReleaseAnalysis:
@@ -689,6 +691,7 @@ async def analyze_release(
     agent_version = by_id[agent_flow_version_id]
     ingestion_version = by_id[ingestion_flow_version_id]
     errors = [
+        *(source_document_errors or []),
         *_validate_json_schema(api.input_schema, "input_schema"),
         *_validate_json_schema(api.output_schema, "output_schema"),
         *_example_errors(api.input_schema, api.request_example, "request_example"),
@@ -830,6 +833,7 @@ async def analyze_release(
                 "config": config.model_dump(mode="json"),
                 "api": api.model_dump(mode="json"),
                 "acceptance_tests": acceptance_payload,
+                "source_documents": source_documents or [],
             }
         ),
         "flows": flow_entries,
@@ -854,6 +858,7 @@ async def analyze_release(
         "external_endpoints": sorted(endpoints),
         "secret_names": sorted(name for name in secrets if name),
         "dependency_lock": dependency_lock,
+        "source_documents": copy.deepcopy(source_documents or []),
         "acceptance_tests": acceptance_payload,
         "knowledge_base_alias": next(iter(shared_knowledge_aliases), None),
         "sandbox": {
