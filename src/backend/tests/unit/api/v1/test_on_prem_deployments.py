@@ -75,6 +75,7 @@ def _release_payload(agent_version_id: str, ingestion_version_id: str) -> dict[s
         "release_version": "1.0.0",
         "agent_flow_version_id": agent_version_id,
         "ingestion_flow_version_id": ingestion_version_id,
+        "config": {"base_image_digest": f"sha256:{'a' * 64}"},
         "api": {
             "input_schema": {
                 "type": "object",
@@ -195,11 +196,11 @@ async def test_create_on_prem_release_from_saved_versions(
     assert body["manifest"]["provider"] == "unnest-on-prem"
     assert [flow["role"] for flow in body["manifest"]["flows"]] == ["agent", "ingestion"]
     assert body["manifest"]["secret_names"] == []
-    assert {"runtime", "redis", "postgresql", "prometheus"}.issubset(body["manifest"]["services"])
+    assert set(body["manifest"]["services"]) == {"runtime", "redis", "postgresql"}
     assert {
         "service": "runtime",
         "name": "https",
-        "port": 443,
+        "port": 7860,
         "protocol": "tcp",
         "scope": "host",
     } in body["manifest"]["ports"]
@@ -212,7 +213,8 @@ async def test_create_on_prem_release_from_saved_versions(
     }
     assert "tests/acceptance.json" in body["manifest"]["package"]["required_files"]
     assert body["manifest"]["build"]["sbom_required"] is True
-    assert body["manifest"]["build"]["unnestctl_targets"] == ["linux-amd64", "linux-arm64"]
+    assert body["manifest"]["build"]["signer_fingerprint"] is None
+    assert body["manifest"]["package"]["layout_version"] == 2
     builds = await client.get(
         f"/api/v1/deployments/on-prem/releases/{body['id']}/builds",
         headers=logged_in_headers,
@@ -240,23 +242,23 @@ async def test_create_on_prem_release_from_saved_versions(
 
         async def submit(self, submitted):
             self.payload = submitted
-            return WorkerBuildStatus(job_id="worker-job-1", status="queued")
+            return WorkerBuildStatus(job_id=submitted["build_id"], status="queued")
 
         async def get(self, _job_id):
             self.sync_count += 1
             if self.sync_count == 1:
                 return WorkerBuildStatus(
-                    job_id="worker-job-1",
+                    job_id=self.payload["build_id"],
                     status="blocked",
                     scan_report={"critical": 1},
                 )
             return WorkerBuildStatus(
-                job_id="worker-job-1",
+                job_id=self.payload["build_id"],
                 status="succeeded",
                 scan_report={"critical": 0},
                 artifacts=[
                     WorkerArtifact(
-                        artifact_type="tar",
+                        artifact_type="package",
                         location="release.tar",
                         digest=f"sha256:{hashlib.sha256(self.artifact_content).hexdigest()}",
                         size_bytes=len(self.artifact_content),
@@ -267,8 +269,13 @@ async def test_create_on_prem_release_from_saved_versions(
                 ],
             )
 
-        async def download_artifact(self, _job_id, _artifact_type):
-            return self.artifact_content
+        async def download_artifact(self, _job_id, _artifact_type, destination, *, max_bytes):
+            assert max_bytes == len(self.artifact_content)
+            destination.write_bytes(self.artifact_content)
+            return (
+                f"sha256:{hashlib.sha256(self.artifact_content).hexdigest()}",
+                len(self.artifact_content),
+            )
 
         async def push_registry(self, _job_id, *, reference, credential_secret_name):
             assert credential_secret_name == "REGISTRY_CREDENTIAL"  # noqa: S105
@@ -472,20 +479,11 @@ async def test_validate_on_prem_release_routes_risky_flow_to_declared_sandbox_ne
     )
 
     assert response.status_code == status.HTTP_200_OK
-    assert response.json()["errors"] == []
-    sandbox = response.json()["manifest"]["sandbox"]
-    assert sandbox["required"] is True
-    assert sandbox["allowed_endpoints"] == ["https://models.internal/v1"]
-    manifest = response.json()["manifest"]
-    assert manifest["build"]["declared_dependency_count"] == 3
-    assert manifest["dependency_lock"]["python_packages"] == [
-        {
-            "name": "agency-sdk",
-            "version": "1.2.3",
-            "hashes": [f"sha256:{'a' * 64}"],
-        }
+    assert response.json()["manifest"] is None
+    assert "Risky Flow export is blocked until the sandbox worker and egress policy are available" in response.json()[
+        "errors"
     ]
-    assert manifest["dependency_lock"]["binaries"][0]["license"] == "Apache-2.0"
+    assert "Offline MVP does not support OS package or external binary dependencies" in response.json()["errors"]
 
 
 async def test_validate_on_prem_release_rejects_unlocked_custom_dependency(

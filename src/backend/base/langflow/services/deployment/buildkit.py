@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
@@ -151,9 +152,27 @@ class BuildKitWorkerClient:
         response.raise_for_status()
         return WorkerArtifact.model_validate(response.json())
 
-    async def download_artifact(self, job_id: str, artifact_type: str) -> bytes:
-        response = await self._client.get(
-            f"/v1/builds/{job_id}/artifacts/{artifact_type}",
-        )
-        response.raise_for_status()
-        return response.content
+    async def download_artifact(
+        self,
+        job_id: str,
+        artifact_type: str,
+        destination: Path,
+        *,
+        max_bytes: int,
+    ) -> tuple[str, int]:
+        if max_bytes <= 0:
+            msg = "Artifact download size limit must be positive"
+            raise ValueError(msg)
+        digest = hashlib.sha256()
+        size = 0
+        async with self._client.stream("GET", f"/v1/builds/{job_id}/artifacts/{artifact_type}") as response:
+            response.raise_for_status()
+            with destination.open("xb") as output:
+                async for chunk in response.aiter_bytes():
+                    if size + len(chunk) > max_bytes:
+                        msg = "Build artifact exceeds its declared size"
+                        raise ValueError(msg)
+                    output.write(chunk)
+                    digest.update(chunk)
+                    size += len(chunk)
+        return f"sha256:{digest.hexdigest()}", size

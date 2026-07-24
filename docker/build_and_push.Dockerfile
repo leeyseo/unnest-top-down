@@ -69,9 +69,11 @@ COPY ./src /app/src
 
 COPY src/frontend /tmp/src/frontend
 WORKDIR /tmp/src/frontend
+ARG UNNEST_RUNTIME=false
 RUN --mount=type=cache,target=/root/.npm \
     npm ci \
-    && ESBUILD_BINARY_PATH="" NODE_OPTIONS="--max-old-space-size=4096" JOBS=1 npm run build \
+    && UNNEST_RUNTIME="$UNNEST_RUNTIME" ESBUILD_BINARY_PATH="" NODE_OPTIONS="--max-old-space-size=4096" JOBS=1 npm run build \
+    && if [ "$UNNEST_RUNTIME" = "true" ]; then touch build/.unnest-runtime-profile; fi \
     && cp -r build /app/src/backend/langflow/frontend \
     && rm -rf /tmp/src/frontend
 

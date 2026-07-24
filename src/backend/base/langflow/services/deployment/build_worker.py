@@ -1,9 +1,9 @@
-"""Isolated HTTP worker that exports an immutable release as a Docker image tar."""
+"""Isolated worker that exports an immutable release as a signed offline package."""
 
 from __future__ import annotations
 
 import base64
-import hashlib
+import copy
 import json
 import os
 import re
@@ -14,12 +14,14 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Response, status
+from fastapi import BackgroundTasks, FastAPI, HTTPException, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
 
 from langflow.services.deployment.buildkit import WorkerArtifact, WorkerBuildStatus
 from langflow.services.deployment.manifest import canonical_digest
-from langflow.unnestctl import verify_license
+from langflow.services.deployment.offline_package import create_reproducible_tar, sha256_file, write_checksums
+from langflow.unnestctl import public_key_fingerprint, verify_license, verify_package
 
 _SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _SECRET_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -31,9 +33,101 @@ USER 0
 COPY --chown=1000:0 bundle /opt/unnest
 ENV UNNEST_RELEASE_BUNDLE=/opt/unnest/release
 ENV DO_NOT_TRACK=true LANGFLOW_DO_NOT_TRACK=true
+RUN python -c "import langflow,pathlib; \
+p=pathlib.Path(langflow.__file__).parent/'frontend/.unnest-runtime-profile'; assert p.is_file()"
 USER 1000
 CMD ["uvicorn","langflow.main:create_runtime_app","--factory","--host","0.0.0.0","--port","7860"]
 """
+_COMPOSE_TEMPLATE = """name: unnest
+services:
+  postgresql:
+    image: {postgres_image}
+    pull_policy: never
+    environment:
+      POSTGRES_DB: unnest
+      POSTGRES_USER: unnest
+      POSTGRES_PASSWORD: ${{UNNEST_DB_PASSWORD:?UNNEST_DB_PASSWORD is required}}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U unnest -d unnest"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  redis:
+    image: {redis_image}
+    pull_policy: never
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  runtime:
+    image: {runtime_image}
+    pull_policy: never
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command:
+      - uvicorn
+      - langflow.main:create_runtime_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "7860"
+      - --ssl-keyfile
+      - /opt/unnest/tls/server.key
+      - --ssl-certfile
+      - /opt/unnest/tls/server.crt
+    environment:
+      LANGFLOW_DATABASE_URL: postgresql://unnest:${{UNNEST_DB_PASSWORD}}@postgresql:5432/unnest
+      LANGFLOW_DATABASE_CONNECTION_RETRY: "true"
+      LANGFLOW_CONFIG_DIR: /app/langflow
+      LANGFLOW_KNOWLEDGE_BASES_DIR: /app/langflow/knowledge_bases
+      LANGFLOW_STORAGE_TYPE: local
+      LANGFLOW_CACHE_TYPE: redis
+      LANGFLOW_REDIS_URL: redis://redis:6379/0
+      LANGFLOW_JOB_QUEUE_TYPE: redis
+      LANGFLOW_REDIS_QUEUE_URL: redis://redis:6379/1
+      LANGFLOW_CELERY_ENABLED: "false"
+      LANGFLOW_AUTO_LOGIN: "false"
+      UNNEST_MASTER_KEY_FILE: /app/langflow/secrets/master.key
+      UNNEST_BACKUP_DIR: /app/langflow/backups
+      DO_NOT_TRACK: "true"
+      LANGFLOW_DO_NOT_TRACK: "true"
+    ports:
+      - "7860:7860"
+    volumes:
+      - runtime-data:/app/langflow
+      - ./tls:/opt/unnest/tls:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    restart: unless-stopped
+
+volumes:
+  runtime-data:
+  postgres-data:
+  redis-data:
+"""
+
+
+def _image_tag(reference: str) -> str:
+    tag = reference.rpartition("@")[0]
+    if ":" not in tag.rsplit("/", 1)[-1]:
+        msg = "Pinned support image references must also include an offline tag"
+        raise ValueError(msg)
+    return tag
 
 
 class BuildFlow(BaseModel):
@@ -74,6 +168,20 @@ class BuildRequest(BaseModel):
         if self.reproducible != {"source_date_epoch": 0, "sort_files": True}:
             msg = "Build must request the supported reproducible settings"
             raise ValueError(msg)
+        if self.manifest.get("build", {}).get("signing_enabled") is not True:
+            msg = "Offline package signing is mandatory"
+            raise ValueError(msg)
+        deployment = self.manifest.get("deployment", {})
+        if (
+            deployment.get("orchestrator") != "compose"
+            or deployment.get("topology") != "single"
+            or deployment.get("architecture") != "amd64"
+        ):
+            msg = "Build request is not an approved offline MVP profile"
+            raise ValueError(msg)
+        if self.manifest.get("sandbox", {}).get("required"):
+            msg = "Risky Flow export requires the sandbox worker, which is not available"
+            raise ValueError(msg)
         return self
 
 
@@ -104,7 +212,11 @@ class BuildWorkerConfig:
     runtime_base_image: str
     license_materials: Path
     license_public_key: Path
-    cosign_key: Path | None = None
+    support_images: Path
+    postgres_image: str
+    redis_image: str
+    cosign_key: Path
+    cosign_public_key: Path
     registry_credentials: Path | None = None
     forbidden_licenses: frozenset[str] = frozenset()
 
@@ -119,6 +231,11 @@ class BuildWorkerConfig:
             "runtime_base_image": os.getenv("UNNEST_RUNTIME_BASE_IMAGE"),
             "license_materials": os.getenv("UNNEST_LICENSE_MATERIALS"),
             "license_public_key": os.getenv("UNNEST_LICENSE_PUBLIC_KEY"),
+            "support_images": os.getenv("UNNEST_SUPPORT_IMAGES"),
+            "postgres_image": os.getenv("UNNEST_POSTGRES_IMAGE"),
+            "redis_image": os.getenv("UNNEST_REDIS_IMAGE"),
+            "cosign_key": os.getenv("UNNEST_COSIGN_KEY"),
+            "cosign_public_key": os.getenv("UNNEST_COSIGN_PUBLIC_KEY"),
         }
         if missing := [name for name, value in required.items() if not value]:
             msg = f"Build worker configuration is incomplete: {', '.join(missing)}"
@@ -136,7 +253,11 @@ class BuildWorkerConfig:
             runtime_base_image=str(required["runtime_base_image"]),
             license_materials=Path(str(required["license_materials"])),
             license_public_key=Path(str(required["license_public_key"])),
-            cosign_key=Path(value) if (value := os.getenv("UNNEST_COSIGN_KEY")) else None,
+            support_images=Path(str(required["support_images"])),
+            postgres_image=str(required["postgres_image"]),
+            redis_image=str(required["redis_image"]),
+            cosign_key=Path(str(required["cosign_key"])),
+            cosign_public_key=Path(str(required["cosign_public_key"])),
             registry_credentials=(
                 Path(value).resolve() if (value := os.getenv("UNNEST_REGISTRY_CREDENTIALS")) else None
             ),
@@ -159,16 +280,31 @@ class BuildWorkerConfig:
             ("BuildKit key", self.buildkit_key),
             ("license directory", self.license_materials),
             ("vendor license public key", self.license_public_key),
+            ("support image directory", self.support_images),
+            ("Cosign key", self.cosign_key),
+            ("Cosign public key", self.cosign_public_key),
         ):
-            if (label == "license directory" and not path.is_dir()) or (
-                label != "license directory" and not path.is_file()
+            is_directory = label in {"license directory", "support image directory"}
+            if (is_directory and not path.is_dir()) or (
+                not is_directory and not path.is_file()
             ):
                 msg = f"{label} does not exist: {path}"
                 raise ValueError(msg)
-        digest = self.runtime_base_image.rpartition("@")[2]
-        if not _SHA256_RE.fullmatch(digest):
-            msg = "Runtime base image must be pinned as repository@sha256:digest"
-            raise ValueError(msg)
+        for label, reference in (
+            ("Runtime base", self.runtime_base_image),
+            ("PostgreSQL", self.postgres_image),
+            ("Redis", self.redis_image),
+        ):
+            if not _SHA256_RE.fullmatch(reference.rpartition("@")[2]):
+                msg = f"{label} image must be pinned as repository@sha256:digest"
+                raise ValueError(msg)
+        _image_tag(self.postgres_image)
+        _image_tag(self.redis_image)
+        for name in ("postgresql.tar", "redis.tar"):
+            image = self.support_images / name
+            if not image.is_file() or image.is_symlink():
+                msg = f"Support image archive is missing: {name}"
+                raise ValueError(msg)
 
 
 class DockerImageBuildWorker:
@@ -268,12 +404,17 @@ class DockerImageBuildWorker:
         for result in report.get("Results", []):
             if not isinstance(result, dict):
                 continue
-            for group in ("Vulnerabilities", "Misconfigurations", "Secrets", "Licenses"):
+            for group in ("Vulnerabilities", "Misconfigurations"):
                 findings.extend(
                     str(item.get("VulnerabilityID") or item.get("ID") or item.get("Name") or group)
                     for item in result.get(group) or []
                     if isinstance(item, dict) and str(item.get("Severity", "")).upper() == "CRITICAL"
                 )
+            findings.extend(
+                f"secret:{item.get('RuleID') or item.get('ID') or item.get('Title') or 'detected'}"
+                for item in result.get("Secrets") or []
+                if isinstance(item, dict)
+            )
             findings.extend(
                 f"forbidden-license:{item['Name']}"
                 for item in result.get("Licenses") or []
@@ -283,6 +424,149 @@ class DockerImageBuildWorker:
             )
         return sorted(set(findings))
 
+    def _verify_image_archive(self, job: Path, image: Path, expected_digest: str) -> str:
+        actual_digest = self._run(
+            ["skopeo", "inspect", "--format", "{{.Digest}}", f"docker-archive:{image}"],
+            cwd=job,
+        ).strip()
+        if actual_digest != expected_digest:
+            msg = f"Image archive digest mismatch: {image.name}"
+            raise RuntimeError(msg)
+        return f"verified image archive {image.name} at {actual_digest}"
+
+    def _scan_image(self, job: Path, *, name: str, image: Path, image_digest: str) -> tuple[dict, dict, list[str]]:
+        sbom_path = job / f"sbom-{name}.cdx.json"
+        report_path = job / f"trivy-{name}.json"
+        logs = [
+            self._run(
+                ["trivy", "image", "--input", str(image), "--format", "cyclonedx", "--output", str(sbom_path)],
+                cwd=job,
+            ),
+            self._run(
+                [
+                    "trivy",
+                    "image",
+                    "--input",
+                    str(image),
+                    "--scanners",
+                    "vuln,secret,misconfig,license",
+                    "--format",
+                    "json",
+                    "--output",
+                    str(report_path),
+                ],
+                cwd=job,
+            ),
+        ]
+        sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        report["image_digest"] = image_digest
+        report["archive_digest"] = f"sha256:{sha256_file(image)}"
+        return sbom, report, logs
+
+    def _stage_package(
+        self,
+        job: Path,
+        request: BuildRequest,
+        *,
+        runtime_image: Path,
+        runtime_image_digest: str,
+        sboms: dict[str, dict],
+        scan_report: dict[str, Any],
+    ) -> tuple[Path, str]:
+        package = job / "package"
+        package.mkdir()
+        image_sources = {
+            "unnest-runtime.tar": (
+                runtime_image,
+                runtime_image_digest,
+                f"unnest-runtime:{request.manifest['release_version']}-amd64@{runtime_image_digest}",
+            ),
+            "postgresql.tar": (
+                self.config.support_images / "postgresql.tar",
+                self.config.postgres_image.rpartition("@")[2],
+                self.config.postgres_image,
+            ),
+            "redis.tar": (
+                self.config.support_images / "redis.tar",
+                self.config.redis_image.rpartition("@")[2],
+                self.config.redis_image,
+            ),
+        }
+        images: list[dict[str, str]] = []
+        for archive_name, (source, image_digest, reference) in image_sources.items():
+            destination = package / "images" / archive_name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            images.append(
+                {
+                    "archive": f"images/{archive_name}",
+                    "archive_digest": f"sha256:{sha256_file(destination)}",
+                    "image_digest": image_digest,
+                    "reference": reference,
+                }
+            )
+
+        manifest = copy.deepcopy(request.manifest)
+        manifest["images"] = images
+        manifest["build"]["runtime_image_digest"] = runtime_image_digest
+        self._write_json(package / "manifest" / "release.json", manifest)
+        self._write_json(package / "openapi" / "openapi.json", manifest["api"]["openapi"])
+        self._write_json(package / "tests" / "acceptance.json", manifest["acceptance_tests"])
+        for flow in request.flows:
+            self._write_json(package / "flows" / f"{flow.version_id}.json", flow.data)
+
+        compose = _COMPOSE_TEMPLATE.format(
+            postgres_image=_image_tag(self.config.postgres_image),
+            redis_image=_image_tag(self.config.redis_image),
+            runtime_image=f"unnest-runtime:{manifest['release_version']}-amd64",
+        )
+        compose_path = package / "compose" / "compose.yml"
+        compose_path.parent.mkdir(parents=True)
+        compose_path.write_text(compose, encoding="utf-8", newline="\n")
+
+        for relative in ("license/license.json", "license/license.sig"):
+            destination = package / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.config.license_materials / relative, destination)
+        self._write_json(package / "reports" / "sbom.cdx.json", sboms["runtime"])
+        self._write_json(package / "reports" / "sbom-postgresql.cdx.json", sboms["postgresql"])
+        self._write_json(package / "reports" / "sbom-redis.cdx.json", sboms["redis"])
+        self._write_json(package / "reports" / "trivy.json", scan_report)
+
+        write_checksums(package)
+        signature_path = package / "signatures" / "checksums.sig"
+        signature_path.parent.mkdir(parents=True)
+        self._run(
+            [
+                "cosign",
+                "sign-blob",
+                "--yes",
+                "--tlog-upload=false",
+                "--key",
+                str(self.config.cosign_key),
+                "--output-signature",
+                str(signature_path),
+                str(package / "checksums.sha256"),
+            ],
+            cwd=job,
+        )
+        signature = signature_path.read_text(encoding="utf-8").strip()
+        base64.b64decode(signature, validate=True)
+
+        fingerprint = manifest["build"]["signer_fingerprint"].removeprefix("sha256:")
+        trust_directory = job / "release-trust"
+        trust_directory.mkdir()
+        shutil.copyfile(self.config.cosign_public_key, trust_directory / f"{fingerprint}.pem")
+        verify_package(
+            package,
+            release_trust_directory=trust_directory,
+            license_public_key=self.config.license_public_key,
+        )
+        archive = job / f"unnest-{manifest['release_version']}-rocky9-amd64.tar"
+        create_reproducible_tar(package, archive)
+        return archive, signature
+
     def run(self, job_id: str) -> None:
         job = self._job(job_id)
         logs: list[str] = []
@@ -290,6 +574,8 @@ class DockerImageBuildWorker:
         self._write_json(job / "status.json", running.model_dump(mode="json"))
         try:
             request = BuildRequest.model_validate_json((job / "request.json").read_text(encoding="utf-8"))
+            signer_fingerprint = public_key_fingerprint(self.config.cosign_public_key.read_bytes())
+            request.manifest["build"]["signer_fingerprint"] = signer_fingerprint
             context = self._prepare_context(job, request)
             image = job / "unnest-runtime.tar"
             metadata = job / "build-metadata.json"
@@ -342,37 +628,38 @@ class DockerImageBuildWorker:
                 msg = "BuildKit did not return a valid image digest"
                 raise RuntimeError(msg)
 
-            sbom_path = job / "sbom.cdx.json"
-            report_path = job / "trivy.json"
-            logs.append(
-                self._run(
-                    ["trivy", "image", "--input", str(image), "--format", "cyclonedx", "--output", str(sbom_path)],
-                    cwd=job,
+            scan_inputs = {
+                "runtime": (image, image_digest),
+                "postgresql": (
+                    self.config.support_images / "postgresql.tar",
+                    self.config.postgres_image.rpartition("@")[2],
+                ),
+                "redis": (
+                    self.config.support_images / "redis.tar",
+                    self.config.redis_image.rpartition("@")[2],
+                ),
+            }
+            sboms: dict[str, dict] = {}
+            reports: dict[str, dict] = {}
+            critical: list[str] = []
+            for name, (archive, digest) in scan_inputs.items():
+                logs.append(self._verify_image_archive(job, archive, digest))
+                sbom, image_report, scan_logs = self._scan_image(
+                    job,
+                    name=name,
+                    image=archive,
+                    image_digest=digest,
                 )
-            )
-            logs.append(
-                self._run(
-                    [
-                        "trivy",
-                        "image",
-                        "--input",
-                        str(image),
-                        "--scanners",
-                        "vuln,secret,misconfig,license",
-                        "--format",
-                        "json",
-                        "--output",
-                        str(report_path),
-                    ],
-                    cwd=job,
-                )
-            )
-            sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
-            report = json.loads(report_path.read_text(encoding="utf-8"))
-            report["image_digest"] = image_digest
-            report["base_image_digest"] = actual_base_digest
-            critical = self._scan_findings(report)
-            report["critical_findings"] = critical
+                sboms[name] = sbom
+                reports[name] = image_report
+                logs.extend(scan_logs)
+                critical.extend(f"{name}:{finding}" for finding in self._scan_findings(image_report))
+            report = {
+                "base_image_digest": actual_base_digest,
+                "images": reports,
+                "critical_findings": sorted(critical),
+            }
+            self._write_json(job / "trivy.json", report)
             if critical and request.critical_override is None:
                 blocked = WorkerBuildStatus(
                     job_id=job_id,
@@ -384,39 +671,25 @@ class DockerImageBuildWorker:
                 return
             if request.critical_override is not None:
                 report["critical_override"] = request.critical_override
+                self._write_json(job / "trivy.json", report)
 
-            digest = f"sha256:{hashlib.sha256(image.read_bytes()).hexdigest()}"
-            signature = None
-            if request.manifest["build"].get("signing_enabled"):
-                if self.config.cosign_key is None or not self.config.cosign_key.is_file():
-                    msg = "Signing is enabled but the Cosign key is unavailable"
-                    raise RuntimeError(msg)
-                signature_path = job / "unnest-runtime.tar.sig"
-                logs.append(
-                    self._run(
-                        [
-                            "cosign",
-                            "sign-blob",
-                            "--yes",
-                            "--key",
-                            str(self.config.cosign_key),
-                            "--output-signature",
-                            str(signature_path),
-                            str(image),
-                        ],
-                        cwd=job,
-                    )
-                )
-                signature = signature_path.read_text(encoding="utf-8").strip()
-                base64.b64decode(signature, validate=True)
+            package, signature = self._stage_package(
+                job,
+                request,
+                runtime_image=image,
+                runtime_image_digest=image_digest,
+                sboms=sboms,
+                scan_report=report,
+            )
+            digest = f"sha256:{sha256_file(package)}"
 
             artifact = WorkerArtifact(
-                artifact_type="tar",
-                location=f"/v1/builds/{job_id}/artifacts/tar",
+                artifact_type="package",
+                location=f"/v1/builds/{job_id}/artifacts/package",
                 digest=digest,
-                size_bytes=image.stat().st_size,
-                checksums={image.name: digest},
-                sbom=sbom,
+                size_bytes=package.stat().st_size,
+                checksums={package.name: digest},
+                sbom=sboms,
                 signature=signature,
             )
             succeeded = WorkerBuildStatus(
@@ -431,12 +704,16 @@ class DockerImageBuildWorker:
             failed = WorkerBuildStatus(job_id=job_id, status="failed", logs=str(exc))
             self._write_json(job / "status.json", failed.model_dump(mode="json"))
 
-    def artifact(self, job_id: str) -> bytes:
+    def artifact(self, job_id: str) -> Path:
         worker_status = self._status(job_id)
         if worker_status.status != "succeeded":
             msg = "Build artifact is not ready"
             raise KeyError(msg)
-        return (self._job(job_id) / "unnest-runtime.tar").read_bytes()
+        matches = list(self._job(job_id).glob("unnest-*-rocky9-amd64.tar"))
+        if len(matches) != 1 or matches[0].is_symlink():
+            msg = "Build package is unavailable"
+            raise KeyError(msg)
+        return matches[0]
 
     def push_registry(self, job_id: str, request: RegistryPushRequest) -> WorkerArtifact:
         worker_status = self._status(job_id)
@@ -515,14 +792,14 @@ def create_build_worker_app(worker: DockerImageBuildWorker | None = None) -> Fas
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
     @app.get("/v1/builds/{job_id}/artifacts/{artifact_type}")
-    async def download(job_id: str, artifact_type: str) -> Response:
-        if artifact_type != "tar":
+    async def download(job_id: str, artifact_type: str) -> FileResponse:
+        if artifact_type != "package":
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
         try:
-            content = build_worker.artifact(job_id)
+            artifact = build_worker.artifact(job_id)
         except (KeyError, OSError) as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-        return Response(content, media_type="application/x-tar")
+        return FileResponse(artifact, media_type="application/x-tar", filename=artifact.name)
 
     @app.post("/v1/builds/{job_id}/registry", response_model=WorkerArtifact)
     async def push_registry(job_id: str, request: RegistryPushRequest) -> WorkerArtifact:

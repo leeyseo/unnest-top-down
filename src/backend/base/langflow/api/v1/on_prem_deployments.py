@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import col, select
+from starlette.background import BackgroundTask
 
 from langflow.api.utils import CurrentActiveUser, DbSession, DbSessionReadOnly
 from langflow.api.v1.schemas.on_prem_deployments import (
@@ -42,6 +44,7 @@ from langflow.services.deployment import (
 )
 
 router = APIRouter(prefix="/deployments/on-prem/releases", tags=["On-premise Deployments"])
+MAX_OFFLINE_PACKAGE_SIZE = 50 * 1024**3
 
 
 def _to_read(release: DeploymentRelease, *, warnings: list[str] | None = None) -> OnPremReleaseRead:
@@ -147,6 +150,21 @@ async def _apply_worker_status(
     build: DeploymentBuild,
     worker: WorkerBuildStatus,
 ) -> None:
+    if worker.job_id != str(build.id):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="BuildKit worker returned a mismatched build job id",
+        )
+    if worker.status == "succeeded" and (
+        len(worker.artifacts) != 1
+        or worker.artifacts[0].artifact_type != "package"
+        or worker.artifacts[0].size_bytes <= 0
+        or worker.artifacts[0].size_bytes > MAX_OFFLINE_PACKAGE_SIZE
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="BuildKit worker did not return exactly one non-empty package artifact",
+        )
     if (
         worker.status == "succeeded"
         and release.manifest.get("build", {}).get("signing_enabled")
@@ -425,20 +443,28 @@ async def download_artifact(
         artifact_id=artifact_id,
         user_id=current_user.id,
     )
-    if artifact.artifact_type not in {"tar", "package"}:
+    if artifact.artifact_type != "package":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Only package artifacts can be downloaded",
         )
     if not build.worker_job_id or build.status != "succeeded":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Build artifact is not ready")
+    temporary = TemporaryDirectory(prefix="unnest-download-")
+    destination = Path(temporary.name) / "release.tar"
     try:
         async with _worker_client_or_503() as client:
-            content = await client.download_artifact(build.worker_job_id, artifact.artifact_type)
-    except httpx.HTTPError as exc:
+            actual_digest, actual_size = await client.download_artifact(
+                build.worker_job_id,
+                artifact.artifact_type,
+                destination,
+                max_bytes=artifact.size_bytes,
+            )
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        temporary.cleanup()
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Artifact download failed") from exc
-    actual_digest = f"sha256:{hashlib.sha256(content).hexdigest()}"
-    if actual_digest != artifact.digest or (artifact.size_bytes and len(content) != artifact.size_bytes):
+    if actual_digest != artifact.digest or actual_size != artifact.size_bytes:
+        temporary.cleanup()
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Downloaded artifact failed integrity verification",
@@ -455,13 +481,14 @@ async def download_artifact(
     )
     await session.flush()
     filename = f"unnest-{release.version}-{build.architecture}.tar"
-    return Response(
-        content,
+    return FileResponse(
+        destination,
+        filename=filename,
         media_type="application/x-tar",
         headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
             "X-Checksum-SHA256": artifact.digest.removeprefix("sha256:"),
         },
+        background=BackgroundTask(temporary.cleanup),
     )
 
 

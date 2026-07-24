@@ -127,8 +127,6 @@ def _deployment_services(config: OnPremDeploymentConfig, detected: set[str]) -> 
         services.add("ollama")
     if config.features.clamav:
         services.add("clamav")
-    if config.features.monitoring:
-        services.add("prometheus")
     if config.features.grafana:
         services.add("grafana")
     return sorted(services)
@@ -139,7 +137,7 @@ def _deployment_ports(services: list[str]) -> list[dict[str, Any]]:
         {
             "service": "runtime",
             "name": "https",
-            "port": 443,
+            "port": 7860,
             "protocol": "tcp",
             "scope": "host",
         }
@@ -696,6 +694,30 @@ async def analyze_release(
         *_example_errors(api.input_schema, api.request_example, "request_example"),
         *_example_errors(api.output_schema, api.response_example, "response_example"),
     ]
+    supported_profile = {
+        "orchestrator": "compose",
+        "topology": "single",
+        "architecture": "amd64",
+        "accelerator": "cpu",
+        "database": "embedded-postgresql",
+        "storage": "local",
+        "infrastructure": "bundled",
+        "model_runtime": "external",
+    }
+    configured_profile = config.model_dump(mode="json")
+    errors.extend(
+        f"Offline MVP requires {name}={expected}"
+        for name, expected in supported_profile.items()
+        if configured_profile.get(name) != expected
+    )
+    if config.include_model_weights:
+        errors.append("Offline MVP does not support bundled model weights")
+    if not config.features.signing:
+        errors.append("Offline MVP requires release signing")
+    if config.features.clamav or config.features.grafana:
+        errors.append("Offline MVP does not yet package optional ClamAV or Grafana services")
+    if config.base_image_digest is None:
+        errors.append("Offline MVP requires a digest-pinned Runtime base image")
     try:
         json.dumps(api.response_example)
     except (TypeError, ValueError):
@@ -763,6 +785,13 @@ async def analyze_release(
         errors.extend(_merge_declared_dependencies(dependency_lock, flow_declared_dependencies))
         sandbox = sandbox or flow_sandbox
 
+    if dependency_lock["python_packages"]:
+        errors.append("Custom Python dependency wheels are not yet available in the offline package")
+    if dependency_lock["os_packages"] or dependency_lock["binaries"]:
+        errors.append("Offline MVP does not support OS package or external binary dependencies")
+    if sandbox:
+        errors.append("Risky Flow export is blocked until the sandbox worker and egress policy are available")
+
     api_version = next_api_version(previous_manifest, api.input_schema, api.output_schema)
     acceptance_payload = (
         [test.model_dump(mode="json") for test in acceptance_tests]
@@ -789,12 +818,10 @@ async def analyze_release(
         ]
     )
     errors.extend(_acceptance_errors(acceptance_payload))
-    orchestrator_files = (
-        ["compose/compose.yml"]
-        if config.orchestrator == "compose"
-        else ["helm/unnest/Chart.yaml", "helm/unnest/values.yaml"]
-    )
     deployment_services = _deployment_services(config, services)
+    unsupported_services = sorted(set(deployment_services).difference({"runtime", "postgresql", "redis"}))
+    if unsupported_services:
+        errors.append(f"Offline MVP does not yet package services: {', '.join(unsupported_services)}")
     manifest = {
         "schema_version": 1,
         "provider": "unnest-on-prem",
@@ -844,32 +871,22 @@ async def analyze_release(
             "sbom_required": True,
             "checksums_required": True,
             "signing_enabled": config.features.signing,
-            "unnestctl_targets": ["linux-amd64", "linux-arm64"],
+            "signer_fingerprint": None,
         },
         "package": {
-            "layout_version": 1,
+            "layout_version": 2,
             "required_files": [
                 "manifest/release.json",
                 "openapi/openapi.json",
                 "reports/sbom.cdx.json",
                 "reports/trivy.json",
                 "tests/acceptance.json",
-                "bin/unnestctl-amd64",
-                "bin/unnestctl-arm64",
                 "license/license.json",
                 "license/license.sig",
-                "keys/license.pub",
-                *orchestrator_files,
-                *(
-                    [
-                        "signatures/release-manifest.sig",
-                        "keys/cosign.pub",
-                    ]
-                    if config.features.signing
-                    else []
-                ),
+                "compose/compose.yml",
+                "signatures/checksums.sig",
             ],
-            "required_globs": ["images/*.tar"],
+            "required_globs": ["flows/*.json", "images/*.tar"],
         },
     }
     return ReleaseAnalysis(

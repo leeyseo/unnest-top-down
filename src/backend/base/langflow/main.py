@@ -936,8 +936,12 @@ def create_app(*, runtime_only: bool = False):
 
 
 def create_runtime_app() -> FastAPI:
-    """Create the API-only app used by exported on-premise releases."""
-    return create_app(runtime_only=True)
+    """Create the restricted API and UI app used by exported on-premise releases."""
+    app = create_app(runtime_only=True)
+    static_files = get_static_files_dir()
+    if static_files.is_dir():
+        setup_static_files(app, static_files)
+    return app
 
 
 def add_sentry_middleware(app: FastAPI) -> None:

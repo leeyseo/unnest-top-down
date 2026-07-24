@@ -12,6 +12,12 @@ government administrator installs the resulting release on an internet-isolated
 server, completes setup in a browser, and runs both safe and sandboxed flows
 without transferring runtime data to the SI network.
 
+The current layout-v2 checkpoint implements the signed safe-Flow package and
+installer. It deliberately blocks risky Flows, custom Python dependencies, and
+bundled source documents until the later sandbox and dependency/document
+checkpoints are implemented. Those blocked features remain part of this final
+definition of done.
+
 ## Supported profile
 
 | Area | MVP decision |
@@ -61,6 +67,10 @@ temporary directory using traversal-safe extraction, verifies the signed
 checksum file before using package contents, and rejects missing, additional, or
 modified required files.
 
+`unnestctl` itself is installed through the separately approved vendor channel.
+It is not copied from, or executed out of, the release tar because that would
+make the package part of its own trust bootstrap.
+
 ## Package contract
 
 ```text
@@ -68,20 +78,18 @@ unnest-<release>-rocky9-amd64.tar
 ├── manifest/release.json
 ├── openapi/openapi.json
 ├── compose/compose.yml
+├── flows/<flow-version-id>.json
 ├── images/unnest-runtime.tar
 ├── images/postgresql.tar
 ├── images/redis.tar
-├── images/unnest-sandbox-worker.tar
-├── images/unnest-egress-proxy.tar
-├── dependencies/python/
-├── documents/source/
 ├── reports/sbom.cdx.json
+├── reports/sbom-postgresql.cdx.json
+├── reports/sbom-redis.cdx.json
 ├── reports/trivy.json
 ├── tests/acceptance.json
 ├── license/license.json
 ├── license/license.sig
 ├── signatures/checksums.sig
-├── bin/unnestctl-linux-amd64
 └── checksums.sha256
 ```
 
@@ -99,10 +107,13 @@ Docker Compose starts:
 
 - the Runtime API and restricted Runtime UI;
 - PostgreSQL;
-- Redis;
-- a standard Flow worker;
-- a sandbox worker; and
-- an allowlist egress proxy used only by the sandbox worker.
+- Redis.
+
+Safe Flow execution currently runs in the Runtime process, which is the only
+executor actually connected to the Runtime API. Export validation blocks risky
+Flows instead of packaging the existing sandbox client stub. A sandbox worker
+and allowlist proxy are added only after their server protocol and isolation
+tests exist; that checkpoint will increment the package layout.
 
 The same immutable release snapshot is used by REST, streaming, web chat,
 webhook, and cron execution.
@@ -236,4 +247,3 @@ begins.
    - Apply `.agents/skills/frontend-testing` and `.agents/skills/frontend-code-review` before commit.
 6. **Air-gapped acceptance**
    - Apply `e2e-testing` and retain the executable Rocky Linux test harness and results.
-

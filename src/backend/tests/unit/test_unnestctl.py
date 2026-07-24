@@ -3,12 +3,14 @@ import hashlib
 import json
 import socket
 import sqlite3
+import stat
 import tarfile
 from io import BytesIO
 from pathlib import Path
 
 import httpx
 import pytest
+from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from langflow.services.deployment.offline_package import create_reproducible_tar, write_checksums
@@ -50,11 +52,25 @@ def _write_signed_package(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     monkeypatch.setenv("UNNEST_RELEASE_TRUST_DIR", str(trust_directory))
     monkeypatch.setenv("UNNEST_LICENSE_PUBLIC_KEY", str(license_public_key))
+    agent_flow = {"nodes": [{"id": "agent"}], "edges": []}
+    ingestion_flow = {"nodes": [{"id": "ingestion"}], "edges": []}
+    agent_digest = hashlib.sha256(json.dumps(agent_flow, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+    ingestion_digest = hashlib.sha256(
+        json.dumps(ingestion_flow, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
     files = {
-        "images/runtime.tar": b"oci image",
+        "compose/compose.yml": b"services: {}\n",
+        "flows/agent-version.json": json.dumps(agent_flow, sort_keys=True).encode(),
+        "flows/ingestion-version.json": json.dumps(ingestion_flow, sort_keys=True).encode(),
+        "images/unnest-runtime.tar": b"runtime image",
+        "images/postgresql.tar": b"postgresql image",
+        "images/redis.tar": b"redis image",
         "license/license.json": json.dumps(
             {"expires_at": "2099-01-01T00:00:00Z", "release_digest": release_digest}
         ).encode(),
+        "openapi/openapi.json": b'{"openapi":"3.1.0"}',
+        "reports/sbom.cdx.json": b'{"bomFormat":"CycloneDX"}',
+        "reports/trivy.json": b'{"critical_findings":[]}',
         "tests/acceptance.json": json.dumps(
             [
                 {
@@ -82,9 +98,39 @@ def _write_signed_package(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "deployment": {
             "architecture": "amd64",
             "orchestrator": "compose",
+            "topology": "single",
             "accelerator": "cpu",
+            "database": "embedded-postgresql",
+            "storage": "local",
+            "infrastructure": "bundled",
+            "model_runtime": "external",
             "resources": {"cpu": 1, "memory_bytes": 1, "disk_bytes": 1},
         },
+        "flows": [
+            {
+                "id": "agent-version",
+                "role": "agent",
+                "digest": f"sha256:{agent_digest}",
+            },
+            {
+                "id": "ingestion-version",
+                "role": "ingestion",
+                "digest": f"sha256:{ingestion_digest}",
+            },
+        ],
+        "images": [
+            {
+                "archive": relative,
+                "archive_digest": f"sha256:{hashlib.sha256(files[relative]).hexdigest()}",
+                "image_digest": f"sha256:{str(index) * 64}",
+                "reference": f"image-{index}@sha256:{str(index) * 64}",
+            }
+            for index, relative in enumerate(
+                ("images/unnest-runtime.tar", "images/postgresql.tar", "images/redis.tar"),
+                start=1,
+            )
+        ],
+        "sandbox": {"required": False},
         "external_endpoints": [],
         "acceptance_tests": json.loads(files["tests/acceptance.json"]),
         "package": {
@@ -95,7 +141,7 @@ def _write_signed_package(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
                 "license/license.sig",
                 "tests/acceptance.json",
             ],
-            "required_globs": ["images/*.tar"],
+            "required_globs": ["flows/*.json", "images/*.tar"],
         },
     }
     files["manifest/release.json"] = json.dumps(manifest, sort_keys=True).encode()
@@ -119,7 +165,7 @@ def test_verify_package_checks_checksums_signatures_and_license(tmp_path, monkey
 
     assert verify_package(package)["release_version"] == "1.0.0"
 
-    (package / "images" / "runtime.tar").write_bytes(b"tampered")
+    (package / "images" / "unnest-runtime.tar").write_bytes(b"tampered")
     with pytest.raises(PackageValidationError, match="Checksum mismatch"):
         verify_package(package)
 
@@ -210,6 +256,41 @@ def test_preflight_port_probe_detects_a_bound_tcp_port():
         assert _tcp_port_available(port, "127.0.0.1") is False
 
     assert _tcp_port_available(port, "127.0.0.1") is True
+
+
+def test_install_loads_verified_images_and_starts_persistent_compose(tmp_path, monkeypatch):
+    package = _write_signed_package(tmp_path / "package", monkeypatch)
+    commands: list[tuple[list[str], Path]] = []
+    monkeypatch.setattr("langflow.unnestctl.platform.system", lambda: "Linux")
+    monkeypatch.setattr("langflow.unnestctl._rocky_linux_9", lambda: True)
+    monkeypatch.setattr("langflow.unnestctl._docker_compose_available", lambda: True)
+    monkeypatch.setattr("langflow.unnestctl.shutil.which", lambda command: f"/usr/bin/{command}")
+    monkeypatch.setattr(
+        "langflow.unnestctl._run",
+        lambda command, cwd: commands.append((command, cwd)),
+    )
+    install_root = tmp_path / "installed"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "install",
+            str(package),
+            "--install-root",
+            str(install_root),
+            "--server-name",
+            "127.0.0.1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [command[:3] for command, _cwd in commands[:3]] == [["docker", "image", "load"]] * 3
+    assert commands[-1][0][-2:] == ["--pull", "never"]
+    release_directory = install_root / "releases" / "1.0.0"
+    assert (release_directory / "compose.yml").is_file()
+    assert stat.S_IMODE((release_directory / ".env").stat().st_mode) == 0o600
+    assert x509.load_pem_x509_certificate((release_directory / "tls" / "server.crt").read_bytes())
+    assert json.loads((install_root / "current.json").read_text())["url"] == "https://127.0.0.1:7860/setup"
 
 
 def test_acceptance_runs_signed_required_tests_and_sends_api_key(tmp_path, monkeypatch):

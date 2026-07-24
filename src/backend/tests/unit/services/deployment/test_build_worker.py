@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import tarfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -77,11 +78,21 @@ def _request(build_id, base_digest: str) -> BuildRequest:
         "release_digest": canonical_digest(flows),
         "flows": flows,
         "api": {"version": "v1", "openapi": {"openapi": "3.1.0"}},
-        "deployment": {"architecture": "amd64"},
+        "deployment": {
+            "architecture": "amd64",
+            "orchestrator": "compose",
+            "topology": "single",
+            "accelerator": "cpu",
+            "database": "embedded-postgresql",
+            "storage": "local",
+            "infrastructure": "bundled",
+            "model_runtime": "external",
+        },
         "build": {
             "architecture": "amd64",
             "base_image_digest": base_digest,
-            "signing_enabled": False,
+            "signing_enabled": True,
+            "signer_fingerprint": None,
         },
         "acceptance_tests": [
             {
@@ -92,6 +103,22 @@ def _request(build_id, base_digest: str) -> BuildRequest:
             }
         ],
         "knowledge_base_alias": "shared",
+        "sandbox": {"required": False},
+        "package": {
+            "layout_version": 2,
+            "required_files": [
+                "manifest/release.json",
+                "openapi/openapi.json",
+                "reports/sbom.cdx.json",
+                "reports/trivy.json",
+                "tests/acceptance.json",
+                "license/license.json",
+                "license/license.sig",
+                "compose/compose.yml",
+                "signatures/checksums.sig",
+            ],
+            "required_globs": ["flows/*.json", "images/*.tar"],
+        },
     }
     return BuildRequest(
         release_id=uuid4(),
@@ -113,6 +140,20 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
         tmp_path / "materials",
         first_request.manifest["release_digest"],
     )
+    support_images = tmp_path / "support-images"
+    support_images.mkdir()
+    (support_images / "postgresql.tar").write_bytes(b"postgresql image")
+    (support_images / "redis.tar").write_bytes(b"redis image")
+    signing_key = Ed25519PrivateKey.generate()
+    cosign_key = tmp_path / "cosign.key"
+    cosign_key.write_bytes(b"test private key placeholder")
+    cosign_public_key = tmp_path / "cosign.pub"
+    cosign_public_key.write_bytes(
+        signing_key.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
     tls = tmp_path / "tls"
     tls.mkdir()
     for name in ("ca.pem", "cert.pem", "key.pem"):
@@ -126,6 +167,11 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
         runtime_base_image=f"registry.internal/unnest-runtime@{digest}",
         license_materials=license_materials,
         license_public_key=license_public_key,
+        support_images=support_images,
+        postgres_image=f"docker.io/library/postgres:16@sha256:{'c' * 64}",
+        redis_image=f"docker.io/library/redis:7@sha256:{'d' * 64}",
+        cosign_key=cosign_key,
+        cosign_public_key=cosign_public_key,
     )
     worker = DockerImageBuildWorker(config)
     commands: list[list[str]] = []
@@ -145,6 +191,14 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
                 destination.write_text(json.dumps({"bomFormat": "CycloneDX", "components": []}), encoding="utf-8")
             else:
                 destination.write_text(json.dumps({"Results": []}), encoding="utf-8")
+        elif command[0] == "cosign":
+            destination = Path(command[command.index("--output-signature") + 1])
+            blob = Path(command[-1]).read_bytes()
+            destination.write_bytes(base64.b64encode(signing_key.sign(blob)))
+        elif command[:2] == ["skopeo", "inspect"]:
+            archive = command[-1]
+            character = "b" if "unnest-runtime" in archive else "c" if "postgresql" in archive else "d"
+            return f"sha256:{character * 64}"
         return ""
 
     monkeypatch.setattr(worker, "_run", fake_run)
@@ -157,8 +211,17 @@ def test_worker_builds_reproducible_docker_image_tar(tmp_path, monkeypatch):
     worker.run(str(second_request.build_id))
     second = worker._status(str(second_request.build_id))
 
-    assert first.status == second.status == "succeeded"
+    assert first.status == second.status == "succeeded", (first.logs, second.logs)
+    assert first.artifacts[0].artifact_type == "package"
     assert first.artifacts[0].digest == second.artifacts[0].digest
-    assert worker.artifact(str(first_request.build_id)) == b"deterministic docker image"
+    with tarfile.open(worker.artifact(str(first_request.build_id)), "r:") as package:
+        assert {"manifest/release.json", "compose/compose.yml", "signatures/checksums.sig"}.issubset(
+            package.getnames()
+        )
     assert [command[0] for command in commands].count("buildctl") == 2
-    assert [command[0] for command in commands].count("trivy") == 4
+    assert [command[0] for command in commands].count("trivy") == 12
+    assert [command[0] for command in commands].count("cosign") == 2
+    assert [command[0] for command in commands].count("skopeo") == 6
+    assert worker._scan_findings(
+        {"Results": [{"Secrets": [{"Severity": "HIGH", "RuleID": "embedded-api-key"}]}]}
+    ) == ["secret:embedded-api-key"]

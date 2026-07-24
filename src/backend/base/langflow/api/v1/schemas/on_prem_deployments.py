@@ -100,7 +100,7 @@ class OnPremDeploymentConfig(BaseModel):
     include_model_weights: bool = False
     store_conversations: bool = False
     conversation_retention_days: int | None = Field(default=None, ge=1)
-    tls: Literal["institution", "self-signed"] = "institution"
+    tls: Literal["institution", "self-signed"] = "self-signed"
     default_language: Literal["ko", "en"] = "ko"
     allow_language_switch: bool = True
     external_endpoints: list[HttpUrl] = Field(default_factory=list)

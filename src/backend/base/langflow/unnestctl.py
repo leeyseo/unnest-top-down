@@ -5,16 +5,19 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
 import math
 import os
 import platform
+import re
+import secrets
 import shutil
 import socket
 import stat
 import tarfile
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
@@ -22,9 +25,11 @@ from urllib.parse import urlparse
 
 import httpx
 import typer
+from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
+from cryptography.x509.oid import NameOID
 
 from langflow.services.deployment.offline_package import (
     CHECKSUM_FILE,
@@ -42,17 +47,49 @@ app.add_typer(trust_app, name="trust")
 SUPPORTED_ARCHITECTURES = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
 SHA256_HEX_LENGTH = 64
 MAX_ACCEPTANCE_TESTS = 100
+MIN_ROOT_FLOWS = 2
 MIN_HTTP_STATUS = 100
 MAX_HTTP_STATUS = 599
 MAX_TCP_PORT = 65535
 MAX_ARCHIVE_MEMBERS = 10_000
-MAX_ARCHIVE_FILE_SIZE = 100 * 1024**3
-MAX_ARCHIVE_TOTAL_SIZE = 500 * 1024**3
+MAX_ARCHIVE_FILE_SIZE = 30 * 1024**3
+MAX_ARCHIVE_TOTAL_SIZE = 50 * 1024**3
 MAX_SIGNED_METADATA_SIZE = 16 * 1024**2
 PACKAGE_LAYOUT_VERSION = 2
 ASCII_CONTROL_END = 32
 ASCII_DELETE = 127
+MAX_DNS_NAME_LENGTH = 253
 _UNSIGNED_PACKAGE_FILES = frozenset({CHECKSUM_FILE, CHECKSUM_SIGNATURE_FILE})
+_REQUIRED_LAYOUT_FILES = frozenset(
+    {
+        "manifest/release.json",
+        "openapi/openapi.json",
+        "compose/compose.yml",
+        "images/unnest-runtime.tar",
+        "images/postgresql.tar",
+        "images/redis.tar",
+        "reports/sbom.cdx.json",
+        "reports/trivy.json",
+        "tests/acceptance.json",
+        "license/license.json",
+        "license/license.sig",
+        CHECKSUM_SIGNATURE_FILE,
+    }
+)
+_MVP_PROFILE = {
+    "orchestrator": "compose",
+    "topology": "single",
+    "architecture": "amd64",
+    "accelerator": "cpu",
+    "database": "embedded-postgresql",
+    "storage": "local",
+    "infrastructure": "bundled",
+    "model_runtime": "external",
+}
+_SEMVER_RE = re.compile(
+    r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
+    r"(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+)
 
 
 class PackageValidationError(ValueError):
@@ -82,6 +119,9 @@ def _package_file(root: Path, relative: str) -> Path:
 def _extract_package_archive(archive_path: Path, destination: Path) -> None:
     """Extract a release archive without allowing links, traversal, or special files."""
     try:
+        archive_size = archive_path.stat().st_size
+        if archive_size > MAX_ARCHIVE_TOTAL_SIZE or shutil.disk_usage(destination).free < archive_size:
+            raise PackageValidationError("Release archive exceeds the safe extraction capacity")
         with tarfile.open(archive_path, mode="r:") as archive:
             seen: set[Path] = set()
             total_size = 0
@@ -151,6 +191,11 @@ def load_manifest(package: Path) -> dict[str, Any]:
     return value
 
 
+def _canonical_digest(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+
 def _package_regular_files(package: Path) -> set[str]:
     files: set[str] = set()
     for path in package.rglob("*"):
@@ -201,7 +246,7 @@ def verify_checksums(package: Path) -> set[str]:
     return checked
 
 
-def _public_key_fingerprint(public_key_blob: bytes) -> str:
+def public_key_fingerprint(public_key_blob: bytes) -> str:
     try:
         public_key = serialization.load_pem_public_key(public_key_blob)
         if not isinstance(
@@ -223,11 +268,11 @@ def enroll_release_key(public_key_path: Path, trust_directory: Path) -> str:
     if public_key_path.is_symlink() or not public_key_path.is_file():
         raise PackageValidationError("SI release public key is missing or invalid")
     key_blob = _read_limited(public_key_path, label="SI release public key")
-    fingerprint = _public_key_fingerprint(key_blob)
+    fingerprint = public_key_fingerprint(key_blob)
     trust_directory.mkdir(parents=True, exist_ok=True)
     destination = trust_directory / f"{fingerprint.removeprefix('sha256:')}.pem"
     if destination.exists():
-        if destination.is_symlink() or _public_key_fingerprint(destination.read_bytes()) != fingerprint:
+        if destination.is_symlink() or public_key_fingerprint(destination.read_bytes()) != fingerprint:
             raise PackageValidationError("Trusted SI release key destination is invalid")
         return fingerprint
     try:
@@ -278,7 +323,7 @@ def _verify_release_signature(package: Path, trust_directory: Path) -> str:
             continue
         try:
             key_blob = candidate.read_bytes()
-            fingerprint = _public_key_fingerprint(key_blob)
+            fingerprint = public_key_fingerprint(key_blob)
             if candidate.name != f"{fingerprint.removeprefix('sha256:')}.pem":
                 continue
             _verify_blob_signature(key_blob, signature, checksums)
@@ -307,6 +352,75 @@ def verify_license(package: Path, manifest: dict[str, Any], public_key_path: Pat
         raise PackageValidationError("Offline license does not permit this exact release")
 
 
+def _validate_layout(package: Path, manifest: dict[str, Any], checked: set[str]) -> None:
+    deployment = manifest.get("deployment")
+    if not isinstance(deployment, dict) or any(deployment.get(name) != value for name, value in _MVP_PROFILE.items()):
+        raise PackageValidationError("Release does not use the supported offline MVP profile")
+    if manifest.get("sandbox", {}).get("required") is True:
+        raise PackageValidationError("Risky Flow package requires an unavailable sandbox worker")
+    for relative in _REQUIRED_LAYOUT_FILES:
+        if not _package_file(package, relative).is_file():
+            raise PackageValidationError(f"Required package file is missing: {relative}")
+
+    image_entries = manifest.get("images")
+    expected_archives = {
+        "images/unnest-runtime.tar",
+        "images/postgresql.tar",
+        "images/redis.tar",
+    }
+    if (
+        not isinstance(image_entries, list)
+        or len(image_entries) != len(expected_archives)
+        or {entry.get("archive") for entry in image_entries if isinstance(entry, dict)} != expected_archives
+        or {path.relative_to(package).as_posix() for path in (package / "images").glob("*.tar")} != expected_archives
+    ):
+        raise PackageValidationError("Release manifest must declare the three offline image archives")
+    for entry in image_entries:
+        if not isinstance(entry, dict):
+            raise PackageValidationError("Release manifest contains an invalid image entry")
+        archive = entry.get("archive")
+        expected_digest = entry.get("archive_digest")
+        image_digest = entry.get("image_digest")
+        reference = entry.get("reference")
+        if (
+            not isinstance(archive, str)
+            or not isinstance(expected_digest, str)
+            or expected_digest != f"sha256:{sha256_file(_package_file(package, archive))}"
+        ):
+            raise PackageValidationError(f"Release image archive digest is invalid: {archive}")
+        if (
+            not isinstance(image_digest, str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest)
+            or not isinstance(reference, str)
+            or not reference.endswith(f"@{image_digest}")
+        ):
+            raise PackageValidationError(f"Release image reference is not digest-pinned: {archive}")
+
+    flow_entries = manifest.get("flows")
+    if not isinstance(flow_entries, list) or len(flow_entries) < MIN_ROOT_FLOWS:
+        raise PackageValidationError("Release manifest must declare Agent and Ingestion Flow Versions")
+    roles = [entry.get("role") for entry in flow_entries if isinstance(entry, dict)]
+    if roles.count("agent") != 1 or roles.count("ingestion") != 1:
+        raise PackageValidationError("Release manifest requires exactly one Agent and Ingestion Flow Version")
+    expected_flow_files: set[str] = set()
+    for entry in flow_entries:
+        version_id = entry.get("id") if isinstance(entry, dict) else None
+        relative = f"flows/{version_id}.json"
+        expected_flow_files.add(relative)
+        flow_path = _package_file(package, relative)
+        try:
+            flow = json.loads(flow_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PackageValidationError(f"Bundled Flow Version is missing or invalid: {version_id}") from exc
+        if _canonical_digest(flow) != entry.get("digest"):
+            raise PackageValidationError(f"Bundled Flow Version digest mismatch: {version_id}")
+        if relative not in checked:
+            raise PackageValidationError(f"Bundled Flow Version is not checksummed: {version_id}")
+    actual_flow_files = {path.relative_to(package).as_posix() for path in (package / "flows").glob("*.json")}
+    if actual_flow_files != expected_flow_files:
+        raise PackageValidationError("Bundled Flow Version files do not exactly match the release manifest")
+
+
 def _verify_package_directory(
     package: Path,
     *,
@@ -331,6 +445,7 @@ def _verify_package_directory(
         raise PackageValidationError("Release signer fingerprint does not match the trusted signature")
     if package.joinpath("keys/cosign.pub").exists() or package.joinpath("keys/license.pub").exists():
         raise PackageValidationError("Package must not supply its own trust keys")
+    _validate_layout(package, manifest, checked)
     contract = manifest.get("package", {})
     required_paths: set[str] = set()
     for relative in contract.get("required_files", []):
@@ -338,14 +453,21 @@ def _verify_package_directory(
             raise PackageValidationError(f"Required package file is missing: {relative}")
         required_paths.add(relative)
     for pattern in contract.get("required_globs", []):
-        matches = list(package.glob(pattern)) if isinstance(pattern, str) and ".." not in Path(pattern).parts else []
+        matches = (
+            list(package.glob(pattern))
+            if isinstance(pattern, str)
+            and not Path(pattern).is_absolute()
+            and not _has_unsafe_path_characters(pattern)
+            and ".." not in Path(pattern).parts
+            else []
+        )
         validated_matches = [
             path for path in matches if _package_file(package, str(path.relative_to(package))).is_file()
         ]
         if not validated_matches:
             raise PackageValidationError(f"Required package content is missing: {pattern}")
         required_paths.update(str(path.relative_to(package)) for path in validated_matches)
-    if missing_checksums := sorted(required_paths.difference(checked)):
+    if missing_checksums := sorted(required_paths.difference(checked).difference(_UNSIGNED_PACKAGE_FILES)):
         raise PackageValidationError(f"Required files are not checksummed: {', '.join(missing_checksums)}")
     acceptance_path = package / "tests" / "acceptance.json"
     try:
@@ -402,10 +524,43 @@ def _tcp_port_available(port: int, host: str = "") -> bool:
     return True
 
 
+def _rocky_linux_9() -> bool:
+    try:
+        values = {
+            key: value.strip().strip('"')
+            for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines()
+            if "=" in line
+            for key, value in [line.split("=", 1)]
+        }
+    except OSError:
+        return False
+    return values.get("ID") == "rocky" and values.get("VERSION_ID", "").split(".", 1)[0] == "9"
+
+
+def _docker_compose_available() -> bool:
+    import subprocess
+
+    docker = shutil.which("docker")
+    if docker is None:
+        return False
+    try:
+        completed = subprocess.run(  # noqa: S603
+            [docker, "compose", "version"],
+            check=False,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
 def _preflight_directory(package: Path) -> list[str]:
     manifest = _verify_package_directory(package)
     if platform.system() != "Linux":
         raise PackageValidationError("Only Linux is supported")
+    if not _rocky_linux_9():
+        raise PackageValidationError("Rocky Linux 9.x is required")
     architecture = SUPPORTED_ARCHITECTURES.get(platform.machine().lower())
     expected_architecture = manifest.get("deployment", {}).get("architecture")
     if architecture != expected_architecture:
@@ -425,9 +580,8 @@ def _preflight_directory(package: Path) -> list[str]:
         raise PackageValidationError(f"At least {required_disk} bytes of free disk are required")
 
     orchestrator = manifest.get("deployment", {}).get("orchestrator")
-    required_command = "helm" if orchestrator == "helm" else "docker"
-    if shutil.which(required_command) is None and not (orchestrator == "compose" and shutil.which("podman")):
-        raise PackageValidationError(f"{required_command} or a supported alternative is required")
+    if shutil.which("docker") is None or not _docker_compose_available():
+        raise PackageValidationError("Docker Engine with the Docker Compose plugin is required")
     if manifest.get("deployment", {}).get("accelerator") == "nvidia" and shutil.which("nvidia-smi") is None:
         raise PackageValidationError("NVIDIA driver tooling is unavailable")
     if manifest.get("deployment", {}).get("accelerator") == "amd" and shutil.which("rocminfo") is None:
@@ -473,6 +627,150 @@ def _run(command: list[str], cwd: Path) -> None:
     completed = subprocess.run(command, cwd=cwd, check=False)  # noqa: S603
     if completed.returncode:
         raise PackageValidationError(f"Command failed with exit code {completed.returncode}: {command[0]}")
+
+
+def _default_server_name() -> str:
+    try:
+        addresses = {
+            item[4][0]
+            for item in socket.getaddrinfo(socket.gethostname(), None, type=socket.SOCK_STREAM)
+            if item[4][0] not in {"127.0.0.1", "::1"}
+        }
+    except OSError:
+        addresses = set()
+    return sorted(addresses)[0] if addresses else "127.0.0.1"
+
+
+def _certificate_name(server_name: str) -> x509.GeneralName:
+    try:
+        return x509.IPAddress(ipaddress.ip_address(server_name))
+    except ValueError:
+        if len(server_name) > MAX_DNS_NAME_LENGTH or not re.fullmatch(
+            r"(?=.{1,253}\Z)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*"
+            r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?",
+            server_name,
+        ):
+            raise PackageValidationError("Server name must be an IP address or valid DNS name") from None
+        return x509.DNSName(server_name)
+
+
+def _write_tls_material(
+    destination: Path,
+    *,
+    server_name: str,
+    certificate: Path | None,
+    private_key: Path | None,
+) -> None:
+    destination.mkdir(parents=True)
+    certificate_destination = destination / "server.crt"
+    key_destination = destination / "server.key"
+    if (certificate is None) != (private_key is None):
+        raise PackageValidationError("Institution TLS certificate and private key must be supplied together")
+    if certificate is not None and private_key is not None:
+        try:
+            certificate_blob = certificate.read_bytes()
+            key_blob = private_key.read_bytes()
+            parsed_certificate = x509.load_pem_x509_certificate(certificate_blob)
+            parsed_key = serialization.load_pem_private_key(key_blob, password=None)
+            certificate_public_key = parsed_certificate.public_key().public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            private_public_key = parsed_key.public_key().public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+        except (OSError, TypeError, ValueError) as exc:
+            raise PackageValidationError("Institution TLS material is invalid") from exc
+        if certificate_public_key != private_public_key:
+            raise PackageValidationError("Institution TLS certificate and private key do not match")
+    else:
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, server_name[:64])])
+        now = datetime.now(timezone.utc)
+        parsed_certificate = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1))
+            .not_valid_after(now + timedelta(days=365))
+            .add_extension(x509.SubjectAlternativeName([_certificate_name(server_name)]), critical=False)
+            .sign(key, hashes.SHA256())
+        )
+        certificate_blob = parsed_certificate.public_bytes(serialization.Encoding.PEM)
+        key_blob = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    certificate_destination.write_bytes(certificate_blob)
+    key_destination.write_bytes(key_blob)
+    certificate_destination.chmod(0o644)
+    key_destination.chmod(0o600)
+
+
+def _prepare_install_directory(
+    package: Path,
+    manifest: dict[str, Any],
+    *,
+    install_root: Path,
+    server_name: str,
+    certificate: Path | None,
+    private_key: Path | None,
+) -> Path:
+    if install_root.is_symlink():
+        raise PackageValidationError("Install root must not be a symbolic link")
+    install_root = install_root.resolve()
+    release_version = manifest.get("release_version")
+    if not isinstance(release_version, str) or not _SEMVER_RE.fullmatch(release_version):
+        raise PackageValidationError("Release version is not a valid SemVer value")
+    install_root.mkdir(parents=True, exist_ok=True)
+    if (install_root / "current.json").exists():
+        raise PackageValidationError("An Unnest release is already installed; automatic upgrade is not supported")
+    release_directory = install_root / "releases" / release_version
+    releases = release_directory.parent
+    releases.mkdir(parents=True, exist_ok=True)
+    if release_directory.exists():
+        try:
+            installed_manifest = json.loads(
+                (release_directory / "manifest" / "release.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PackageValidationError("Existing release install directory is incomplete") from exc
+        if installed_manifest.get("release_digest") != manifest.get("release_digest"):
+            raise PackageValidationError("Existing release install directory contains a different release")
+        if not all(
+            (release_directory / relative).is_file()
+            for relative in (".env", "compose.yml", "tls/server.crt", "tls/server.key")
+        ):
+            raise PackageValidationError("Existing release install directory is incomplete")
+        return release_directory
+    with TemporaryDirectory(prefix=f".{release_version}-", dir=releases) as staging:
+        staging_directory = Path(staging)
+        for source_relative, destination_relative in (
+            ("compose/compose.yml", "compose.yml"),
+            ("manifest/release.json", "manifest/release.json"),
+            ("openapi/openapi.json", "openapi/openapi.json"),
+            ("tests/acceptance.json", "tests/acceptance.json"),
+            ("license/license.json", "license/license.json"),
+            ("license/license.sig", "license/license.sig"),
+        ):
+            destination = staging_directory / destination_relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(package / source_relative, destination)
+        environment = staging_directory / ".env"
+        environment.write_text(f"UNNEST_DB_PASSWORD={secrets.token_urlsafe(32)}\n", encoding="utf-8")
+        environment.chmod(0o600)
+        _write_tls_material(
+            staging_directory / "tls",
+            server_name=server_name,
+            certificate=certificate,
+            private_key=private_key,
+        )
+        staging_directory.replace(release_directory)
+    return release_directory
 
 
 def _contains_expected(actual: Any, expected: Any) -> bool:
@@ -630,31 +928,63 @@ def acceptance(
 
 
 @app.command()
-def install(package: Path = typer.Argument(..., exists=True)) -> None:
+def install(
+    package: Path = typer.Argument(..., exists=True),
+    install_root: Path = typer.Option(Path("/opt/unnest"), "--install-root"),
+    server_name: str = typer.Option("", "--server-name"),
+    tls_certificate: Path | None = typer.Option(None, "--tls-cert", exists=True, dir_okay=False),
+    tls_private_key: Path | None = typer.Option(None, "--tls-key", exists=True, dir_okay=False),
+) -> None:
+    resolved_server_name = server_name or _default_server_name()
     with _materialize_package(package) as root:
         manifest = _verify_package_directory(root)
         _preflight_directory(root)
-        deployment = manifest.get("deployment", {})
-        if deployment.get("orchestrator") == "helm":
-            _run(
-                [
-                    "helm",
-                    "upgrade",
-                    "--install",
-                    "unnest",
-                    "helm/unnest",
-                    "--namespace",
-                    "unnest",
-                    "--create-namespace",
-                ],
-                root,
-            )
-        else:
-            runtime = "docker" if shutil.which("docker") else "podman"
-            for image in sorted((root / "images").glob("*.tar")):
-                _run([runtime, "load", "--input", str(image)], root)
-            _run([runtime, "compose", "-f", "compose/compose.yml", "up", "-d"], root)
-    typer.echo("installed; open the runtime URL shown by your deployment profile to complete initial setup")
+        if manifest.get("deployment", {}).get("tls") == "institution" and (
+            tls_certificate is None or tls_private_key is None
+        ):
+            raise PackageValidationError("This release requires an institution TLS certificate and private key")
+        release_directory = _prepare_install_directory(
+            root,
+            manifest,
+            install_root=install_root,
+            server_name=resolved_server_name,
+            certificate=tls_certificate,
+            private_key=tls_private_key,
+        )
+        for image in sorted((root / "images").glob("*.tar")):
+            _run(["docker", "image", "load", "--input", str(image)], root)
+        _run(
+            [
+                "docker",
+                "compose",
+                "--env-file",
+                ".env",
+                "-f",
+                "compose.yml",
+                "up",
+                "-d",
+                "--pull",
+                "never",
+            ],
+            release_directory,
+        )
+        marker = install_root.resolve() / "current.json"
+        temporary_marker = marker.with_suffix(".tmp")
+        temporary_marker.write_text(
+            json.dumps(
+                {
+                    "release_version": manifest["release_version"],
+                    "release_digest": manifest["release_digest"],
+                    "directory": str(release_directory),
+                    "url": f"https://{resolved_server_name}:7860/setup",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        temporary_marker.replace(marker)
+    typer.echo(f"installed; open https://{resolved_server_name}:7860/setup to complete initial setup")
 
 
 @app.command()
