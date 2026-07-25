@@ -190,6 +190,15 @@ describe("InspectionPanelHeader", () => {
       expect(screen.queryByTestId("docs-button-modal")).not.toBeInTheDocument();
     });
 
+    it("should hide legacy Langflow documentation", () => {
+      const data = createMockData({
+        documentation: "https://docs.langflow.org/components",
+      });
+      render(<InspectionPanelHeader data={data} />);
+
+      expect(screen.queryByTestId("docs-button-modal")).not.toBeInTheDocument();
+    });
+
     it("should open documentation when docs button is clicked", async () => {
       const user = userEvent.setup();
       const customOpenNewTab =

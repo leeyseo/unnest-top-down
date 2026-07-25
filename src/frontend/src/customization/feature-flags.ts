@@ -6,7 +6,6 @@ export const ENABLE_CUSTOM_PARAM = false;
 export const ENABLE_INTEGRATIONS = false;
 export const ENABLE_DATASTAX_LANGFLOW = false;
 export const ENABLE_FILE_MANAGEMENT = true;
-export const ENABLE_WIDGET = true;
 export const ENABLE_VOICE_ASSISTANT = true;
 export const ENABLE_FILES_ON_PLAYGROUND = true;
 export const ENABLE_MCP = true;

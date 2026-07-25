@@ -146,32 +146,6 @@ function ApiInterceptor() {
       },
     );
 
-    const isAuthorizedURL = (url) => {
-      const authorizedDomains = [
-        "https://raw.githubusercontent.com/langflow-ai/langflow_examples/main/examples",
-        "https://api.github.com/repos/langflow-ai/langflow_examples/contents/examples",
-        "https://api.github.com/repos/langflow-ai/langflow",
-        "auto_login",
-      ];
-
-      const authorizedEndpoints = ["auto_login"];
-
-      try {
-        const parsedURL = new URL(url);
-        const isDomainAllowed = authorizedDomains.some(
-          (domain) => parsedURL.origin === new URL(domain).origin,
-        );
-        const isEndpointAllowed = authorizedEndpoints.some((endpoint) =>
-          parsedURL.pathname.includes(endpoint),
-        );
-
-        return isDomainAllowed || isEndpointAllowed;
-      } catch (_e) {
-        // Invalid URL
-        return false;
-      }
-    };
-
     // Check for external url which we don't want to add custom headers to
     const isExternalURL = (url: string): boolean => {
       const EXTERNAL_DOMAINS = [

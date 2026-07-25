@@ -77,7 +77,7 @@ export function FlowPageSlidingContainerContent({
     if (chatHistory.length > prevChatLenRef.current) {
       const lastMsg = chatHistory[chatHistory.length - 1];
       if (lastMsg?.isSend) {
-        window.dispatchEvent(new Event("langflow-scroll-to-bottom"));
+        window.dispatchEvent(new Event("unnest-scroll-to-bottom"));
         stickyInstance.scrollToBottom("smooth");
       }
     }

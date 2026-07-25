@@ -46,6 +46,10 @@ export default function InspectionPanelHeader({
 
   const setNoticeData = useAlertStore((state) => state.setNoticeData);
   const setSuccessData = useAlertStore((state) => state.setSuccessData);
+  const documentation = data.node?.documentation ?? "";
+  const hasDocs =
+    documentation !== "" &&
+    !/^https?:\/\/docs\.langflow\.org(?:\/|$)/i.test(documentation);
 
   const handleCopyId = useCallback(() => {
     navigator.clipboard.writeText(data.id);
@@ -59,13 +63,13 @@ export default function InspectionPanelHeader({
   }, [hasCode]);
 
   const openDocs = useCallback(() => {
-    if (data.node?.documentation) {
-      return customOpenNewTab(data.node.documentation);
+    if (hasDocs) {
+      return customOpenNewTab(documentation);
     }
     setNoticeData({
       title: `${data.id} docs is not available at the moment.`,
     });
-  }, [data.id, data.node?.documentation, setNoticeData]);
+  }, [data.id, documentation, hasDocs, setNoticeData]);
 
   // Wrapper to match CodeAreaModal's expected signature
   const handleSetValue = useCallback(
@@ -76,8 +80,6 @@ export default function InspectionPanelHeader({
   );
 
   const shortcuts = useShortcutsStore((state) => state.shortcuts);
-
-  const hasDocs = (data.node?.documentation ?? "") !== "";
 
   const isCustomComponent = useMemo(() => {
     const isCustom = data.type === "CustomComponent" && !data.node?.edited;
