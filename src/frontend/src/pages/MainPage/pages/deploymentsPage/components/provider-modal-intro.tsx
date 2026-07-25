@@ -18,7 +18,7 @@ export default function ProviderModalIntro({
           className="h-8 w-8 text-foreground"
         />
         <span className="text-sm font-medium">watsonx Orchestrate</span>
-        <Badge variant="purpleStatic" size="xq" className="shrink-0">
+        <Badge variant="beta" size="xq" className="shrink-0">
           Beta
         </Badge>
       </div>

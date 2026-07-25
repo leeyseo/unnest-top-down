@@ -14,7 +14,7 @@ const FeatureToggles = ({
       label: t("sidebar.betaLabel"),
       checked: showBeta,
       onChange: setShowBeta,
-      badgeVariant: "purpleStatic" as const,
+      badgeVariant: "beta" as const,
       testId: "sidebar-beta-switch",
     },
     {

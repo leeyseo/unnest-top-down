@@ -1241,7 +1241,7 @@ input[type="password"]::-ms-clear {
   }
 
   .beta-badge {
-    @apply flex h-6 w-11 items-center justify-center rounded-lg bg-accent-pink p-2 text-center text-xs font-medium text-accent-pink-foreground;
+    @apply flex h-6 w-11 items-center justify-center rounded-lg bg-beta-background p-2 text-center text-xs font-medium text-beta-foreground;
   }
 
   .icon-size {

@@ -318,7 +318,7 @@ describe("SidebarDraggableComponent", () => {
 
       render(<SidebarDraggableComponent {...propsWithBeta} />);
 
-      expect(screen.getByTestId("badge-purpleStatic-xq")).toBeInTheDocument();
+      expect(screen.getByTestId("badge-beta-xq")).toBeInTheDocument();
       expect(screen.getByText("Beta")).toBeInTheDocument();
     });
 
@@ -338,7 +338,7 @@ describe("SidebarDraggableComponent", () => {
 
       render(<SidebarDraggableComponent {...propsWithBoth} />);
 
-      expect(screen.getByTestId("badge-purpleStatic-xq")).toBeInTheDocument();
+      expect(screen.getByTestId("badge-beta-xq")).toBeInTheDocument();
       expect(
         screen.getByTestId("badge-secondaryStatic-xq"),
       ).toBeInTheDocument();
@@ -349,9 +349,7 @@ describe("SidebarDraggableComponent", () => {
     it("should not render badges when neither beta nor legacy are true", () => {
       render(<SidebarDraggableComponent {...defaultProps} />);
 
-      expect(
-        screen.queryByTestId("badge-purpleStatic-xq"),
-      ).not.toBeInTheDocument();
+      expect(screen.queryByTestId("badge-beta-xq")).not.toBeInTheDocument();
       expect(
         screen.queryByTestId("badge-secondaryStatic-xq"),
       ).not.toBeInTheDocument();
@@ -725,7 +723,7 @@ describe("SidebarDraggableComponent", () => {
 
       render(<SidebarDraggableComponent {...complexProps} />);
 
-      expect(screen.getByTestId("badge-purpleStatic-xq")).toBeInTheDocument();
+      expect(screen.getByTestId("badge-beta-xq")).toBeInTheDocument();
       expect(
         screen.getByTestId("badge-secondaryStatic-xq"),
       ).toBeInTheDocument();

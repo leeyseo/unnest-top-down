@@ -178,9 +178,9 @@ const HeaderComponent = ({
                           : type.charAt(0).toUpperCase() + type.slice(1)}
                   {type === "deployments" && (
                     <Badge
-                      variant="purpleStatic"
+                      variant="beta"
                       size="xq"
-                      className="h-auto shrink-0 rounded px-1 py-px text-[11px] leading-none text-accent-purple-foreground"
+                      className="h-auto shrink-0 rounded px-1 py-px text-[11px] leading-none"
                     >
                       Beta
                     </Badge>

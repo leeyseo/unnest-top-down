@@ -180,11 +180,7 @@ export const SidebarDraggableComponent = forwardRef(
                   </span>
                 </ShadTooltip>
                 {beta && (
-                  <Badge
-                    variant="purpleStatic"
-                    size="xq"
-                    className="ml-1.5 shrink-0"
-                  >
+                  <Badge variant="beta" size="xq" className="ml-1.5 shrink-0">
                     Beta
                   </Badge>
                 )}

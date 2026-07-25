@@ -143,9 +143,9 @@
     --medium-indigo: #6366f1;
     --low-indigo: #e0e7ff;
 
-    --beta-background: rgb(219 234 254);
-    --beta-foreground: rgb(37 99 235);
-    --beta-foreground-soft: rgb(37 99 235 / 80%);
+    --beta-background: rgb(236 252 203);
+    --beta-foreground: rgb(63 98 18);
+    --beta-foreground-soft: rgb(63 98 18 / 80%);
 
     --chat-bot-icon: #afe6ef;
     --chat-user-icon: #aface9;
@@ -457,9 +457,9 @@
     --code-description-background: 0 0% 0%;
     --code-foreground: 240 6% 90%;
 
-    --beta-background: rgb(37 99 235);
-    --beta-foreground: rgb(219 234 254);
-    --beta-foreground-soft: rgb(219 234 254);
+    --beta-background: rgb(54 83 20);
+    --beta-foreground: rgb(190 242 100);
+    --beta-foreground-soft: rgb(190 242 100 / 80%);
 
     --chat-bot-icon: #235d70;
     --chat-user-icon: #4f3d6e;

@@ -117,10 +117,10 @@ export default function NodeName({
       {beta && (
         <div className="shrink-0">
           <ShadTooltip content={t("node.betaComponent")}>
-            <div className="flex h-4 w-4 items-center justify-center rounded-sm border border-accent-purple-foreground p-0.5">
+            <div className="flex h-4 w-4 items-center justify-center rounded-sm border border-beta-foreground bg-beta-background p-0.5">
               <ForwardedIconComponent
                 name="FlaskConical"
-                className="text-accent-purple-foreground"
+                className="text-beta-foreground"
               />
             </div>
           </ShadTooltip>

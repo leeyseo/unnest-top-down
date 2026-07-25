@@ -49,9 +49,7 @@ describe("FeatureToggles", () => {
 
       // Allow multiple instances of "Show" to pass
       expect(screen.getAllByText("Show").length).toBeGreaterThanOrEqual(1);
-      expect(screen.getByTestId("badge-purpleStatic-xq")).toHaveTextContent(
-        "Beta",
-      );
+      expect(screen.getByTestId("badge-beta-xq")).toHaveTextContent("Beta");
       expect(screen.getByTestId("badge-secondaryStatic-xq")).toHaveTextContent(
         "Legacy",
       );
@@ -60,9 +58,7 @@ describe("FeatureToggles", () => {
     it("should render Beta toggle with correct elements", () => {
       render(<FeatureToggles {...defaultProps} />);
 
-      expect(screen.getByTestId("badge-purpleStatic-xq")).toHaveTextContent(
-        "Beta",
-      );
+      expect(screen.getByTestId("badge-beta-xq")).toHaveTextContent("Beta");
       expect(screen.getByTestId("sidebar-beta-switch")).toBeInTheDocument();
     });
 
@@ -275,9 +271,9 @@ describe("FeatureToggles", () => {
     it("should render Beta badge with correct variant and size", () => {
       render(<FeatureToggles {...defaultProps} />);
 
-      const betaBadge = screen.getByTestId("badge-purpleStatic-xq");
+      const betaBadge = screen.getByTestId("badge-beta-xq");
       expect(betaBadge).toHaveTextContent("Beta");
-      expect(betaBadge).toHaveClass("badge-purpleStatic", "badge-xq");
+      expect(betaBadge).toHaveClass("badge-beta", "badge-xq");
     });
 
     it("should render Legacy badge with correct variant and size", () => {
