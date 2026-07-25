@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import React from "react";
 import KnowledgeBaseEmptyState from "../KnowledgeBaseEmptyState";
 
@@ -33,7 +34,11 @@ jest.mock("@/modals/knowledgeBaseUploadModal/KnowledgeBaseUploadModal", () => {
   }: {
     open: boolean;
     setOpen: (open: boolean) => void;
-    onSubmit: (data: any) => void;
+    onSubmit: (data: {
+      sourceName: string;
+      files: File[];
+      embeddingModel: null;
+    }) => void;
   }) {
     return open ? (
       <div data-testid="upload-modal">
@@ -64,14 +69,6 @@ jest.mock("@/components/common/genericIconComponent", () => {
   };
 });
 
-jest.mock("@/components/ui/button", () => ({
-  Button: ({ children, onClick, ...props }: any) => (
-    <button onClick={onClick} {...props}>
-      {children}
-    </button>
-  ),
-}));
-
 const createTestWrapper = () => {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -100,9 +97,11 @@ describe("KnowledgeBaseEmptyState", () => {
       { wrapper: createTestWrapper() },
     );
 
-    expect(screen.getByText("No knowledge bases")).toBeInTheDocument();
     expect(
-      screen.getByText(/Create powerful AI experiences/),
+      screen.getByText("Give your agents something to know"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Add documents and turn them into searchable knowledge/),
     ).toBeInTheDocument();
   });
 
@@ -118,7 +117,8 @@ describe("KnowledgeBaseEmptyState", () => {
     expect(addButton).toBeInTheDocument();
   });
 
-  it("opens modal when Add Knowledge button is clicked", () => {
+  it("opens modal when Add Knowledge button is clicked", async () => {
+    const user = userEvent.setup();
     render(
       <KnowledgeBaseEmptyState
         handleCreateKnowledge={mockHandleCreateKnowledge}
@@ -126,13 +126,13 @@ describe("KnowledgeBaseEmptyState", () => {
       { wrapper: createTestWrapper() },
     );
 
-    const addButton = screen.getByText("Add Knowledge");
-    fireEvent.click(addButton);
+    await user.click(screen.getByRole("button", { name: "Add Knowledge" }));
 
     expect(screen.getByTestId("upload-modal")).toBeInTheDocument();
   });
 
-  it("calls captureSubmit when form is submitted", () => {
+  it("calls captureSubmit when form is submitted", async () => {
+    const user = userEvent.setup();
     render(
       <KnowledgeBaseEmptyState
         handleCreateKnowledge={mockHandleCreateKnowledge}
@@ -140,11 +140,8 @@ describe("KnowledgeBaseEmptyState", () => {
       { wrapper: createTestWrapper() },
     );
 
-    const addButton = screen.getByText("Add Knowledge");
-    fireEvent.click(addButton);
-
-    const submitButton = screen.getByTestId("modal-submit");
-    fireEvent.click(submitButton);
+    await user.click(screen.getByRole("button", { name: "Add Knowledge" }));
+    await user.click(screen.getByRole("button", { name: "Submit" }));
 
     expect(mockCaptureSubmit).toHaveBeenCalledWith({
       sourceName: "TestKB",
@@ -153,7 +150,8 @@ describe("KnowledgeBaseEmptyState", () => {
     });
   });
 
-  it("calls applyOptimisticUpdate when modal closes after submission", () => {
+  it("calls applyOptimisticUpdate when modal closes after submission", async () => {
+    const user = userEvent.setup();
     render(
       <KnowledgeBaseEmptyState
         handleCreateKnowledge={mockHandleCreateKnowledge}
@@ -161,16 +159,14 @@ describe("KnowledgeBaseEmptyState", () => {
       { wrapper: createTestWrapper() },
     );
 
-    const addButton = screen.getByText("Add Knowledge");
-    fireEvent.click(addButton);
-
-    const submitButton = screen.getByTestId("modal-submit");
-    fireEvent.click(submitButton);
+    await user.click(screen.getByRole("button", { name: "Add Knowledge" }));
+    await user.click(screen.getByRole("button", { name: "Submit" }));
 
     expect(mockApplyOptimisticUpdate).toHaveBeenCalled();
   });
 
-  it("closes modal without calling applyOptimisticUpdate when closed without submission", () => {
+  it("closes modal without calling applyOptimisticUpdate when closed without submission", async () => {
+    const user = userEvent.setup();
     mockApplyOptimisticUpdate.mockClear();
 
     render(
@@ -180,13 +176,11 @@ describe("KnowledgeBaseEmptyState", () => {
       { wrapper: createTestWrapper() },
     );
 
-    const addButton = screen.getByText("Add Knowledge");
-    fireEvent.click(addButton);
+    await user.click(screen.getByRole("button", { name: "Add Knowledge" }));
 
     expect(screen.getByTestId("upload-modal")).toBeInTheDocument();
 
-    const closeButton = screen.getByTestId("modal-close");
-    fireEvent.click(closeButton);
+    await user.click(screen.getByRole("button", { name: "Close" }));
 
     // Modal should call applyOptimisticUpdate even on close (it returns false if no submission)
     expect(mockApplyOptimisticUpdate).toHaveBeenCalled();

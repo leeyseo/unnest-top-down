@@ -1,10 +1,5 @@
-import { EmptyPageCommunity } from "@/pages/MainPage/pages/empty-page";
+import { UnnestWelcomeEmptyState } from "@/pages/MainPage/pages/empty-page";
 
-export const CustomEmptyPageCommunity = ({
-  setOpenModal,
-}: {
-  setOpenModal: (open: boolean) => void;
-}) => {
-  return <EmptyPageCommunity setOpenModal={setOpenModal} />;
-};
-export default CustomEmptyPageCommunity;
+export const CustomEmptyPage = () => <UnnestWelcomeEmptyState />;
+
+export default CustomEmptyPage;

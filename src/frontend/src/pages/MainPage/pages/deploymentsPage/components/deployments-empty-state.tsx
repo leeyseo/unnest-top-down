@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import ForwardedIconComponent from "@/components/common/genericIconComponent";
+import UnnestEmptyState from "@/components/common/unnest-empty-state";
 import { Button } from "@/components/ui/button";
 
 interface DeploymentsEmptyStateProps {
@@ -11,22 +12,20 @@ export default function DeploymentsEmptyState({
 }: DeploymentsEmptyStateProps) {
   const { t } = useTranslation();
   return (
-    <div className="flex flex-col items-center justify-center py-24">
-      <h3 className="text-lg font-semibold">
-        {t("deployments.noDeployments")}
-      </h3>
-      <p className="mt-1 text-sm text-muted-foreground">
-        {t("deployments.emptyStateDescription")}
-      </p>
+    <UnnestEmptyState
+      image="Birds/03-eagle.svg"
+      title={t("deployments.noDeployments")}
+      description={t("deployments.emptyStateDescription")}
+      className="py-16"
+    >
       <Button
         variant="outline"
-        className="mt-4"
         data-testid="create-deployment-empty-btn"
         onClick={onAction}
       >
         <ForwardedIconComponent name="Plus" className="h-4 w-4" />
         {t("deployments.createDeployment")}
       </Button>
-    </div>
+    </UnnestEmptyState>
   );
 }
