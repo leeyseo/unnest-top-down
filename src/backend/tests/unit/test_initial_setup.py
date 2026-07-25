@@ -392,11 +392,9 @@ async def test_copy_profile_pictures_creates_directories():
 
     # The function should have been called during app startup (client fixture)
     # Verify the directories exist
-    people_dir = config_path / "profile_pictures" / "People"
-    space_dir = config_path / "profile_pictures" / "Space"
+    birds_dir = config_path / "profile_pictures" / "Birds"
 
-    assert people_dir.exists(), "People directory should exist after copy_profile_pictures"
-    assert space_dir.exists(), "Space directory should exist after copy_profile_pictures"
+    assert birds_dir.exists(), "Birds directory should exist after copy_profile_pictures"
 
 
 @pytest.mark.usefixtures("client")
@@ -406,15 +404,12 @@ async def test_copy_profile_pictures_copies_files():
     config_dir = settings_service.settings.config_dir
     config_path = SyncPath(config_dir)
 
-    people_dir = config_path / "profile_pictures" / "People"
-    space_dir = config_path / "profile_pictures" / "Space"
+    birds_dir = config_path / "profile_pictures" / "Birds"
 
     # Check that files were copied
-    people_files = list(people_dir.glob("*.svg")) if people_dir.exists() else []
-    space_files = list(space_dir.glob("*.svg")) if space_dir.exists() else []
+    bird_files = list(birds_dir.glob("*.svg")) if birds_dir.exists() else []
 
-    assert len(people_files) > 0, "Should have People profile pictures copied"
-    assert len(space_files) > 0, "Should have Space profile pictures copied"
+    assert len(bird_files) == 5, "Should copy the five bird profile pictures"
 
 
 @pytest.mark.usefixtures("client")
@@ -424,12 +419,11 @@ async def test_copy_profile_pictures_specific_files_exist():
     config_dir = settings_service.settings.config_dir
     config_path = SyncPath(config_dir)
 
-    # Check for the default rocket profile picture (used as default in the app)
-    rocket_path = config_path / "profile_pictures" / "Space" / "046-rocket.svg"
-    assert rocket_path.exists(), "Default rocket profile picture should exist"
+    owl_path = config_path / "profile_pictures" / "Birds" / "01-owl.svg"
+    assert owl_path.exists(), "Default owl profile picture should exist"
 
     # Check that the file has content
-    content = rocket_path.read_bytes()
+    content = owl_path.read_bytes()
     assert len(content) > 0, "Profile picture file should have content"
     assert b"<svg" in content or b"<?xml" in content, "Profile picture should be a valid SVG"
 
@@ -442,14 +436,14 @@ async def test_copy_profile_pictures_is_idempotent():
     config_path = SyncPath(config_dir)
 
     # Get initial file count
-    people_dir = config_path / "profile_pictures" / "People"
-    initial_count = len(list(people_dir.glob("*.svg"))) if people_dir.exists() else 0
+    birds_dir = config_path / "profile_pictures" / "Birds"
+    initial_count = len(list(birds_dir.glob("*.svg"))) if birds_dir.exists() else 0
 
     # Call copy_profile_pictures again
     await copy_profile_pictures()
 
     # Count should remain the same (no duplicates)
-    final_count = len(list(people_dir.glob("*.svg"))) if people_dir.exists() else 0
+    final_count = len(list(birds_dir.glob("*.svg"))) if birds_dir.exists() else 0
     assert final_count == initial_count, "Calling copy_profile_pictures again should not create duplicates"
 
 
@@ -460,18 +454,14 @@ async def test_copy_profile_pictures_source_exists():
     source_path = Path(setup.__file__).parent / "profile_pictures"
     assert await source_path.exists(), "Source profile_pictures directory should exist in package"
 
-    people_source = source_path / "People"
-    space_source = source_path / "Space"
+    birds_source = source_path / "Birds"
 
-    assert await people_source.exists(), "Source People directory should exist"
-    assert await space_source.exists(), "Source Space directory should exist"
+    assert await birds_source.exists(), "Source Birds directory should exist"
 
     # Count source files
-    people_files = [f async for f in people_source.glob("*.svg")]
-    space_files = [f async for f in space_source.glob("*.svg")]
+    bird_files = [f async for f in birds_source.glob("*.svg")]
 
-    assert len(people_files) > 0, "Source should have People profile pictures"
-    assert len(space_files) > 0, "Source should have Space profile pictures"
+    assert len(bird_files) == 5, "Source should contain the five bird profile pictures"
 
 
 @pytest.mark.usefixtures("client")
@@ -488,18 +478,15 @@ async def test_profile_pictures_available_via_api(client: AsyncClient, logged_in
     assert len(files) > 0, "Should have profile pictures available via API"
 
     # Check for expected file format
-    assert any(f.startswith("People/") for f in files), "Should have People profile pictures"
-    assert any(f.startswith("Space/") for f in files), "Should have Space profile pictures"
-
-    # Check for the default rocket profile picture
-    assert "Space/046-rocket.svg" in files, "Default rocket profile picture should be available"
+    assert all(f.startswith("Birds/") for f in files), "Only bird profile pictures should be built in"
+    assert "Birds/01-owl.svg" in files, "Default owl profile picture should be available"
 
 
 @pytest.mark.usefixtures("client")
 async def test_profile_picture_can_be_downloaded(client: AsyncClient, logged_in_headers):
     """Test that a profile picture can be downloaded via the API."""
     response = await client.get(
-        "api/v1/files/profile_pictures/Space/046-rocket.svg",
+        "api/v1/files/profile_pictures/Birds/01-owl.svg",
         headers=logged_in_headers,
     )
 

@@ -279,6 +279,7 @@
   "settings.profilePictureDescription": "Choose the image that appears as your profile picture.",
   "settings.profilePictureCategory.People": "People",
   "settings.profilePictureCategory.Space": "Space",
+  "settings.profilePictureCategory.Birds": "Birds",
   "settings.apiKeysTitle": "Unnest API Keys",
   "settings.apiKeys.columnName": "Name",
   "settings.apiKeys.columnKey": "Key",

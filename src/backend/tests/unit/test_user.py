@@ -351,7 +351,7 @@ async def test_normal_user_cant_delete_user(client: AsyncClient, test_user, logg
 async def test_user_can_update_profile_picture(client: AsyncClient, active_user, logged_in_headers):
     """Test that a user can update their profile picture."""
     user_id = active_user.id
-    profile_image = "Space/046-rocket.svg"
+    profile_image = "Birds/01-owl.svg"
     update_data = UserUpdate(profile_image=profile_image)
 
     response = await client.patch(f"/api/v1/users/{user_id}", json=update_data.model_dump(), headers=logged_in_headers)
@@ -368,7 +368,7 @@ async def test_user_can_update_profile_picture(client: AsyncClient, active_user,
 async def test_user_profile_picture_persists(client: AsyncClient, active_user, logged_in_headers):
     """Test that profile picture persists across requests."""
     user_id = active_user.id
-    profile_image = "People/001-man.svg"
+    profile_image = "Birds/02-sparrow.svg"
     update_data = UserUpdate(profile_image=profile_image)
 
     # Update profile picture
@@ -387,9 +387,9 @@ async def test_user_can_change_profile_picture_multiple_times(client: AsyncClien
     """Test that a user can change their profile picture multiple times."""
     user_id = active_user.id
     profile_images = [
-        "Space/046-rocket.svg",
-        "People/001-man.svg",
-        "Space/001-asteroid.svg",
+        "Birds/01-owl.svg",
+        "Birds/02-sparrow.svg",
+        "Birds/03-eagle.svg",
     ]
 
     for profile_image in profile_images:
@@ -418,8 +418,7 @@ async def test_profile_pictures_endpoint_returns_files(client: AsyncClient, logg
 
     # After the fix, profile pictures should be available
     assert len(files) > 0, "Profile pictures list should not be empty after app startup"
-    assert any("Space/" in f for f in files), "Should have Space category profile pictures"
-    assert any("People/" in f for f in files), "Should have People category profile pictures"
+    assert all(f.startswith("Birds/") for f in files), "Only bird profile pictures should be built in"
 
 
 @pytest.mark.api_key_required

@@ -88,5 +88,6 @@
   "settings.nav.mcpServers": "MCP Servers",
   "settings.nav.messages": "메시지",
   "settings.nav.modelProviders": "Model Providers",
-  "settings.nav.shortcuts": "단축키"
+  "settings.nav.shortcuts": "단축키",
+  "settings.profilePictureCategory.Birds": "새 캐릭터"
 }

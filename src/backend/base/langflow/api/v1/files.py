@@ -27,6 +27,9 @@ from langflow.services.storage.service import StorageService
 
 router = APIRouter(tags=["Files"], prefix="/files")
 
+LEGACY_PROFILE_PICTURE_FOLDERS = {"People", "Space"}
+DEFAULT_PROFILE_PICTURE_FOLDER = "Birds"
+
 
 def _get_allowed_profile_picture_folders(settings_service: SettingsService) -> set[str]:
     """Return the set of allowed profile picture folders.
@@ -37,8 +40,8 @@ def _get_allowed_profile_picture_folders(settings_service: SettingsService) -> s
     still safe because we only ever serve files contained within the resolved
     base directory and validate path containment below.
 
-    If no directories can be found (unexpected), fall back to the curated
-    defaults {"People", "Space"} shipped with Langflow.
+    Retired built-in folders remain on upgraded hosts but are not served. If no
+    current directory can be found, fall back to the bundled Birds category.
     """
     allowed: set[str] = set()
     try:
@@ -46,13 +49,17 @@ def _get_allowed_profile_picture_folders(settings_service: SettingsService) -> s
         config_dir = Path(settings_service.settings.config_dir)
         cfg_base = config_dir / "profile_pictures"
         if cfg_base.exists():
-            allowed.update({p.name for p in cfg_base.iterdir() if p.is_dir()})
+            allowed.update(
+                {p.name for p in cfg_base.iterdir() if p.is_dir() and p.name not in LEGACY_PROFILE_PICTURE_FOLDERS}
+            )
         # Package-provided folders
         from langflow.initial_setup import setup
 
         pkg_base = Path(setup.__file__).parent / "profile_pictures"
         if pkg_base.exists():
-            allowed.update({p.name for p in pkg_base.iterdir() if p.is_dir()})
+            allowed.update(
+                {p.name for p in pkg_base.iterdir() if p.is_dir() and p.name not in LEGACY_PROFILE_PICTURE_FOLDERS}
+            )
     except Exception as _:
         import logging
 
@@ -60,7 +67,7 @@ def _get_allowed_profile_picture_folders(settings_service: SettingsService) -> s
         logger.exception("Exception occurred while getting allowed profile picture folders")
 
     # Sensible defaults ensure tests and OOTB behavior
-    return allowed or {"People", "Space"}
+    return allowed or {DEFAULT_PROFILE_PICTURE_FOLDER}
 
 
 # Create dep that gets the flow_id from the request

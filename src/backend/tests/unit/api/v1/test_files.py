@@ -359,26 +359,26 @@ async def setup_profile_pictures(monkeypatch):
     config_path = Path(temp_dir)
 
     # Create profile pictures directory structure
-    people_dir = config_path / "profile_pictures" / "People"
-    space_dir = config_path / "profile_pictures" / "Space"
-    people_dir.mkdir(parents=True, exist_ok=True)
-    space_dir.mkdir(parents=True, exist_ok=True)
+    birds_dir = config_path / "profile_pictures" / "Birds"
+    custom_dir = config_path / "profile_pictures" / "Custom"
+    birds_dir.mkdir(parents=True, exist_ok=True)
+    custom_dir.mkdir(parents=True, exist_ok=True)
 
     # Create test profile picture files (must be > 100 bytes for test assertions)
-    rocket_svg = (
+    owl_svg = (
         b'<svg height="100" width="100" xmlns="http://www.w3.org/2000/svg">'
         b'<circle cx="50" cy="50" r="40" fill="red" stroke="darkred" stroke-width="2"/>'
         b'<path d="M 50 10 L 60 30 L 50 25 L 40 30 Z" fill="orange"/></svg>'
     )
-    person_svg = (
+    custom_svg = (
         b'<svg height="100" width="100" xmlns="http://www.w3.org/2000/svg">'
         b'<circle cx="50" cy="50" r="40" fill="blue" stroke="darkblue" stroke-width="2"/>'
         b'<circle cx="40" cy="40" r="5" fill="white"/><circle cx="60" cy="40" r="5" fill="white"/>'
         b'<path d="M 40 65 Q 50 70 60 65" stroke="white" stroke-width="2" fill="none"/></svg>'
     )
 
-    (space_dir / "046-rocket.svg").write_bytes(rocket_svg)
-    (people_dir / "001-person.svg").write_bytes(person_svg)
+    (birds_dir / "01-owl.svg").write_bytes(owl_svg)
+    (custom_dir / "001-custom.svg").write_bytes(custom_svg)
 
     # Override the config_dir setting BEFORE app initialization
     monkeypatch.setenv("LANGFLOW_CONFIG_DIR", str(config_path))
@@ -410,58 +410,40 @@ async def test_list_profile_pictures(setup_profile_pictures, files_client):  # n
     assert len(files) > 0, "Should have at least some profile pictures"
 
     # Check that files are properly formatted as "Folder/filename"
-    assert any(file.startswith("Space/") for file in files), "Should have Space profile pictures"
-    assert any(file.startswith("People/") for file in files), "Should have People profile pictures"
+    assert any(file.startswith("Birds/") for file in files), "Should have bird profile pictures"
+    assert any(file.startswith("Custom/") for file in files), "Should preserve custom profile pictures"
+    assert not any(file.startswith(("People/", "Space/")) for file in files)
+    assert "Birds/01-owl.svg" in files
 
-    # Check that the rocket file exists (either our test one or the real one)
-    assert "Space/046-rocket.svg" in files, "Should have the rocket profile picture"
 
-
-async def test_download_profile_picture_space_rocket(setup_profile_pictures, files_client):  # noqa: ARG001
-    """Test downloading the rocket profile picture from Space folder.
+async def test_download_profile_picture_owl(setup_profile_pictures, files_client):  # noqa: ARG001
+    """Test downloading the default owl profile picture.
 
     Args:
         files_client: HTTP client for making API requests
         setup_profile_pictures: Fixture that sets up profile pictures directory
     """
-    response = await files_client.get("api/v1/files/profile_pictures/Space/046-rocket.svg")
+    response = await files_client.get("api/v1/files/profile_pictures/Birds/01-owl.svg")
     assert response.status_code == 200
 
     # Verify content type
     assert "image/svg+xml" in response.headers["content-type"]
 
-    # Verify content - check for SVG structure (real rocket.svg has <path> elements)
+    # Verify content
     content = response.content
     assert b"<svg" in content
     assert b"</svg>" in content
-    # Real rocket has path elements, not circles
     assert len(content) > 100, "SVG content should be substantial"
 
 
-async def test_download_profile_picture_people(setup_profile_pictures, files_client):  # noqa: ARG001
-    """Test downloading a profile picture from People folder.
-
-    Note: The actual people profile pictures are copied during app init,
-    so we test with whatever profile picture exists.
+async def test_download_custom_profile_picture(setup_profile_pictures, files_client):  # noqa: ARG001
+    """Test downloading an operator-provided profile picture.
 
     Args:
         files_client: HTTP client for making API requests
         setup_profile_pictures: Fixture that sets up profile pictures directory
     """
-    # List available people profile pictures first
-    list_response = await files_client.get("api/v1/files/profile_pictures/list")
-    assert list_response.status_code == 200
-    people_files = [f for f in list_response.json()["files"] if f.startswith("People/")]
-
-    # Skip test if no people profile pictures are available
-    if not people_files:
-        import pytest
-
-        pytest.skip("No people profile pictures available")
-
-    # Test downloading the first available people profile picture
-    first_people_file = people_files[0].replace("People/", "")
-    response = await files_client.get(f"api/v1/files/profile_pictures/People/{first_people_file}")
+    response = await files_client.get("api/v1/files/profile_pictures/Custom/001-custom.svg")
     assert response.status_code == 200
 
     # Verify content type
@@ -481,7 +463,7 @@ async def test_download_profile_picture_not_found(setup_profile_pictures, files_
         files_client: HTTP client for making API requests
         setup_profile_pictures: Fixture that sets up profile pictures directory
     """
-    response = await files_client.get("api/v1/files/profile_pictures/Space/nonexistent.svg")
+    response = await files_client.get("api/v1/files/profile_pictures/Birds/nonexistent.svg")
     assert response.status_code == 404
 
     data = response.json()
@@ -508,10 +490,10 @@ async def test_profile_pictures_with_s3_storage(setup_profile_pictures, files_cl
     data = response.json()
     # Should have profile pictures (app copies them during init)
     assert len(data["files"]) > 0, "Should have profile pictures even with S3 storage"
-    assert "Space/046-rocket.svg" in data["files"], "Should have rocket profile picture"
+    assert "Birds/01-owl.svg" in data["files"], "Should have owl profile picture"
 
     # Download should still work (from local filesystem)
-    response = await files_client.get("api/v1/files/profile_pictures/Space/046-rocket.svg")
+    response = await files_client.get("api/v1/files/profile_pictures/Birds/01-owl.svg")
     assert response.status_code == 200
     assert b"<svg" in response.content
 
@@ -527,20 +509,13 @@ async def test_profile_pictures_different_file_types(setup_profile_pictures, fil
         setup_profile_pictures: Fixture that sets up profile pictures directory
     """
     # Test SVG content type (all real profile pictures are SVGs)
-    response = await files_client.get("api/v1/files/profile_pictures/Space/046-rocket.svg")
+    response = await files_client.get("api/v1/files/profile_pictures/Birds/01-owl.svg")
     assert response.status_code == 200
     assert "image/svg+xml" in response.headers["content-type"]
 
-    # Test with a people profile picture
-    list_response = await files_client.get("api/v1/files/profile_pictures/list")
-    people_files = [f for f in list_response.json()["files"] if f.startswith("People/")]
-
-    if people_files:
-        first_people_file = people_files[0].replace("People/", "")
-        response = await files_client.get(f"api/v1/files/profile_pictures/People/{first_people_file}")
-        assert response.status_code == 200
-        # All profile pictures should be SVGs
-        assert "image/svg+xml" in response.headers["content-type"]
+    response = await files_client.get("api/v1/files/profile_pictures/Custom/001-custom.svg")
+    assert response.status_code == 200
+    assert "image/svg+xml" in response.headers["content-type"]
 
 
 # ============================================================================
@@ -578,8 +553,7 @@ async def test_download_profile_picture_fallback_to_package(empty_config_dir, fi
     This tests the core fix from PR #10758 - when profile pictures don't exist
     in config_dir, they should be served from the package's bundled directory.
     """
-    # The 046-rocket.svg should be found in the package's bundled directory
-    response = await files_client.get("api/v1/files/profile_pictures/Space/046-rocket.svg")
+    response = await files_client.get("api/v1/files/profile_pictures/Birds/01-owl.svg")
     assert response.status_code == 200, (
         f"Expected 200, got {response.status_code}. Fallback to package profile pictures should work."
     )
@@ -608,11 +582,8 @@ async def test_list_profile_pictures_fallback_to_package(empty_config_dir, files
 
     # Should have files from the package
     assert len(files) > 0, "Should have profile pictures from package fallback"
-    assert any(f.startswith("Space/") for f in files), "Should have Space profile pictures"
-    assert any(f.startswith("People/") for f in files), "Should have People profile pictures"
-
-    # The bundled rocket should be available
-    assert "Space/046-rocket.svg" in files
+    assert all(f.startswith("Birds/") for f in files)
+    assert "Birds/01-owl.svg" in files
 
 
 async def test_download_profile_picture_not_found_in_both_locations(empty_config_dir, files_client):  # noqa: ARG001
@@ -621,18 +592,18 @@ async def test_download_profile_picture_not_found_in_both_locations(empty_config
     This ensures the fallback logic correctly returns 404 when the file
     is not found in either location.
     """
-    response = await files_client.get("api/v1/files/profile_pictures/Space/nonexistent-file-xyz.svg")
+    response = await files_client.get("api/v1/files/profile_pictures/Birds/nonexistent-file-xyz.svg")
     assert response.status_code == 404
 
     data = response.json()
     assert "not found" in data["detail"].lower()
-    assert "Space/nonexistent-file-xyz.svg" in data["detail"]
+    assert "Birds/nonexistent-file-xyz.svg" in data["detail"]
 
 
 async def test_download_profile_picture_invalid_folder(empty_config_dir, files_client):  # noqa: ARG001
     """Test 400 when using an invalid folder name.
 
-    Only 'People' and 'Space' folders are whitelisted for security.
+    Only discovered non-legacy folders are allowed for security.
     Invalid folder names should be rejected with 400 Bad Request.
     """
     response = await files_client.get("api/v1/files/profile_pictures/InvalidFolder/file.svg")
@@ -651,13 +622,13 @@ async def test_download_profile_picture_config_dir_takes_precedence(setup_profil
     """
     config_path = setup_profile_pictures
 
-    # Create a custom rocket SVG in config_dir with identifiable content
+    # Create a custom owl SVG in config_dir with identifiable content
     custom_svg = b'<svg xmlns="http://www.w3.org/2000/svg"><text>CUSTOM_CONFIG_DIR_VERSION</text></svg>'
-    space_dir = config_path / "profile_pictures" / "Space"
-    space_dir.mkdir(parents=True, exist_ok=True)
-    (space_dir / "046-rocket.svg").write_bytes(custom_svg)
+    birds_dir = config_path / "profile_pictures" / "Birds"
+    birds_dir.mkdir(parents=True, exist_ok=True)
+    (birds_dir / "01-owl.svg").write_bytes(custom_svg)
 
-    response = await files_client.get("api/v1/files/profile_pictures/Space/046-rocket.svg")
+    response = await files_client.get("api/v1/files/profile_pictures/Birds/01-owl.svg")
     assert response.status_code == 200
 
     # Should get the config_dir version, not the package version
@@ -674,9 +645,9 @@ async def test_list_profile_pictures_config_dir_takes_precedence(setup_profile_p
     config_path = setup_profile_pictures
 
     # Ensure we have a file in config_dir
-    space_dir = config_path / "profile_pictures" / "Space"
-    space_dir.mkdir(parents=True, exist_ok=True)
-    (space_dir / "custom-test-file.svg").write_bytes(b"<svg></svg>")
+    birds_dir = config_path / "profile_pictures" / "Birds"
+    birds_dir.mkdir(parents=True, exist_ok=True)
+    (birds_dir / "custom-test-file.svg").write_bytes(b"<svg></svg>")
 
     response = await files_client.get("api/v1/files/profile_pictures/list")
     assert response.status_code == 200
@@ -685,7 +656,7 @@ async def test_list_profile_pictures_config_dir_takes_precedence(setup_profile_p
     files = data["files"]
 
     # Should include our custom file from config_dir
-    assert "Space/custom-test-file.svg" in files
+    assert "Birds/custom-test-file.svg" in files
 
 
 async def test_download_profile_picture_path_traversal_attempt(empty_config_dir, files_client):  # noqa: ARG001
@@ -705,10 +676,8 @@ async def test_download_profile_picture_special_characters_in_filename(empty_con
 
     Filenames with spaces or special characters should be handled properly.
     """
-    # Test with URL-encoded space (the real file has a space: "042-space shuttle.svg")
-    response = await files_client.get("api/v1/files/profile_pictures/Space/042-space%20shuttle.svg")
-    # Should work if the file exists with that name, or 404 if not
-    assert response.status_code in [200, 404]
+    response = await files_client.get("api/v1/files/profile_pictures/Birds/missing%20bird.svg")
+    assert response.status_code == 404
 
 
 async def test_list_profile_pictures_empty_response_format(empty_config_dir, files_client):  # noqa: ARG001
@@ -730,7 +699,7 @@ async def test_list_profile_pictures_empty_response_format(empty_config_dir, fil
     for file_path in data["files"]:
         assert "/" in file_path, f"File path should contain '/': {file_path}"
         folder, filename = file_path.split("/", 1)
-        assert folder in ["People", "Space"], f"Invalid folder: {folder}"
+        assert folder == "Birds", f"Invalid folder: {folder}"
         assert len(filename) > 0, "Filename should not be empty"
 
 
@@ -739,8 +708,7 @@ async def test_download_profile_picture_content_is_valid_svg(empty_config_dir, f
 
     This ensures the fallback serves actual SVG content, not corrupted data.
     """
-    # Download the rocket from package fallback
-    response = await files_client.get("api/v1/files/profile_pictures/Space/046-rocket.svg")
+    response = await files_client.get("api/v1/files/profile_pictures/Birds/01-owl.svg")
     assert response.status_code == 200
 
     content = response.content
@@ -753,19 +721,17 @@ async def test_download_profile_picture_content_is_valid_svg(empty_config_dir, f
 
 @pytest.fixture
 async def partial_config_dir(monkeypatch):
-    """Fixture that sets up a config directory with only People folder (no Space).
+    """Fixture that sets up a config directory containing legacy profiles.
 
-    This tests the edge case where config_dir is partially populated.
+    This verifies that retired built-in categories are hidden after upgrade.
     """
     temp_dir = tempfile.mkdtemp()
     config_path = Path(temp_dir)
 
-    # Create only People directory with a file
+    # A prior installation may still have these files on disk.
     people_dir = config_path / "profile_pictures" / "People"
     people_dir.mkdir(parents=True, exist_ok=True)
     (people_dir / "test-person.svg").write_bytes(b"<svg><circle/></svg>")
-
-    # Note: Space directory is NOT created intentionally
 
     # Override the config_dir setting BEFORE app initialization
     monkeypatch.setenv("LANGFLOW_CONFIG_DIR", str(config_path))
@@ -779,24 +745,17 @@ async def partial_config_dir(monkeypatch):
 
 
 async def test_profile_pictures_fallback_with_partial_config_dir(partial_config_dir, files_client):  # noqa: ARG001
-    """Test fallback when config_dir has only People folder but not Space.
-
-    This is an edge case where config_dir is partially populated.
-    """
-    # For list: since we have at least one file in People, it should NOT fallback completely
-    # The current implementation only falls back if BOTH people AND space are empty
+    """Test that legacy config files are hidden and birds remain available."""
     response = await files_client.get("api/v1/files/profile_pictures/list")
     assert response.status_code == 200
 
     data = response.json()
     files = data["files"]
 
-    # Should have our People file from config_dir
-    assert "People/test-person.svg" in files
-
-    # For download: Space files should still work via fallback to package
-    response = await files_client.get("api/v1/files/profile_pictures/Space/046-rocket.svg")
-    assert response.status_code == 200, "Space files should fallback to package"
+    assert "People/test-person.svg" not in files
+    assert "Birds/01-owl.svg" in files
+    response = await files_client.get("api/v1/files/profile_pictures/People/test-person.svg")
+    assert response.status_code == 400
 
 
 # ============================================================================

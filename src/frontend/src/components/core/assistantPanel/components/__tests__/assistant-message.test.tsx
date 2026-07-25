@@ -7,7 +7,7 @@ import { AssistantMessageItem } from "../assistant-message";
 jest.mock("@/contexts/authContext", () => ({
   AuthContext: {
     _currentValue: {
-      userData: { profile_image: "Space/046-rocket.svg" },
+      userData: { profile_image: "Birds/01-owl.svg" },
     },
   },
 }));
@@ -20,7 +20,7 @@ jest
     // Return auth context mock for AuthContext
     const authCtx = require("@/contexts/authContext").AuthContext;
     if (ctx === authCtx) {
-      return { userData: { profile_image: "Space/046-rocket.svg" } };
+      return { userData: { profile_image: "Birds/01-owl.svg" } };
     }
     return mockUseContext(ctx);
   });
