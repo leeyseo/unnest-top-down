@@ -1,4 +1,5 @@
 import type { ChatMessageType } from "../../../../../types/chat";
+import { parseApiTimestamp } from "../../../../../utils/dateTime";
 
 // Cache for parsed timestamps to improve performance during sorting
 const timestampCache = new WeakMap<ChatMessageType, number>();
@@ -20,18 +21,24 @@ const sortSenderMessages = (a: ChatMessageType, b: ChatMessageType): number => {
   // Use WeakMap cache to avoid repeated Date parsing for same message objects
   let timeA = timestampCache.get(a);
   if (timeA === undefined) {
-    timeA = new Date(a.timestamp).getTime();
+    timeA = parseApiTimestamp(a.timestamp)?.getTime() ?? Number.NaN;
     timestampCache.set(a, timeA);
   }
 
   let timeB = timestampCache.get(b);
   if (timeB === undefined) {
-    timeB = new Date(b.timestamp).getTime();
+    timeB = parseApiTimestamp(b.timestamp)?.getTime() ?? Number.NaN;
     timestampCache.set(b, timeB);
   }
 
+  if (Number.isNaN(timeA)) {
+    if (!Number.isNaN(timeB)) return 1;
+  } else if (Number.isNaN(timeB)) {
+    return -1;
+  }
+
   // Primary sort: by timestamp
-  if (timeA !== timeB) {
+  if (!Number.isNaN(timeA) && !Number.isNaN(timeB) && timeA !== timeB) {
     return timeA - timeB;
   }
 

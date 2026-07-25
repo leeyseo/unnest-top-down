@@ -1443,7 +1443,8 @@ export function syncNodeTranslations(): void {
           knownFields[fieldName]?.display_name ?? [];
         const isKnownTranslation =
           knownFieldDisplayNames.length === 0 ||
-          knownFieldDisplayNames.includes(currentDisplayName);
+          (currentDisplayName !== undefined &&
+            knownFieldDisplayNames.includes(currentDisplayName));
         if (isKnownTranslation) {
           updatedTemplate[fieldName] = {
             ...updatedTemplate[fieldName],

@@ -430,14 +430,11 @@ describe("MemoryDetailsHeader", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows read the docs link in activate tooltip with correct href", () => {
+  it("does not link to external product documentation", () => {
     render(<MemoryDetailsHeader {...makeProps()} />);
-    const link = screen.getByRole("link", { name: /read the docs/i });
-    expect(link).toHaveAttribute(
-      "href",
-      "https://docs.langflow.org/memory-bases",
-    );
-    expect(link).toHaveAttribute("target", "_blank");
+    expect(
+      screen.queryByRole("link", { name: /read the docs/i }),
+    ).not.toBeInTheDocument();
   });
 
   describe("All Sessions dropdown option", () => {

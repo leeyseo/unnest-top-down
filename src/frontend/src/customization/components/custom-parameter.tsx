@@ -14,7 +14,7 @@ export function CustomParameterComponent({
   inputId,
   templateData,
   templateValue,
-  showParameter,
+  showParameter = true,
   inspectionPanel = false,
   editNode,
   handleNodeClass,
@@ -30,8 +30,8 @@ export function CustomParameterComponent({
   inputId: targetHandleType;
   templateData: Partial<InputFieldType>;
   templateValue: any;
-  showParameter: boolean;
-  inspectionPanel: boolean;
+  showParameter?: boolean;
+  inspectionPanel?: boolean;
   editNode: boolean;
   handleNodeClass: (value: any, code?: string, type?: string) => void;
   nodeClass: APIClassType;

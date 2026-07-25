@@ -1,5 +1,5 @@
 import { cn } from "@/utils/utils";
-export const AthenaComponent = ({ className, ...props }) => (
+export const AthenaComponent = ({ className = "", ...props }) => (
   <svg
     width="300"
     className={cn("dark:invert", className)}

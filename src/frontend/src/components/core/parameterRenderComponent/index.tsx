@@ -37,7 +37,7 @@ export function ParameterRenderComponent({
   templateData,
   templateValue,
   editNode,
-  showParameter,
+  showParameter = true,
   inspectionPanel = false,
   handleNodeClass,
   nodeClass,
@@ -54,8 +54,8 @@ export function ParameterRenderComponent({
   templateData: Partial<InputFieldType>;
   templateValue: unknown;
   editNode: boolean;
-  showParameter: boolean;
-  inspectionPanel: boolean;
+  showParameter?: boolean;
+  inspectionPanel?: boolean;
   handleNodeClass: (value: unknown, code?: string, type?: string) => void;
   nodeClass: APIClassType;
   disabled: boolean;
@@ -257,7 +257,9 @@ export function ParameterRenderComponent({
         return (
           <SliderComponent
             {...baseInputProps}
-            value={templateValue}
+            value={
+              templateValue as string | number | string[] | number[]
+            }
             rangeSpec={templateData.rangeSpec ?? templateData.range_spec}
             minLabel={templateData?.min_label}
             maxLabel={templateData?.max_label}

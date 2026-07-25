@@ -134,8 +134,8 @@ export function useFlowVersionSidebar(flowId: string) {
       });
     } else if (selectedId === CURRENT_DRAFT_ID || processedPreview?.error) {
       useFlowStore.setState({
-        nodes: cloneDeep(originalDraftNodesRef.current),
-        edges: cloneDeep(originalDraftEdgesRef.current),
+        nodes: cloneDeep(originalDraftNodesRef.current ?? []),
+        edges: cloneDeep(originalDraftEdgesRef.current ?? []),
       });
     }
     // Fit the canvas to the new nodes after ReactFlow processes the state update.
@@ -171,8 +171,8 @@ export function useFlowVersionSidebar(flowId: string) {
       );
     } else if (selectedId === CURRENT_DRAFT_ID || processedPreview?.error) {
       setPreview(
-        cloneDeep(originalDraftNodesRef.current),
-        cloneDeep(originalDraftEdgesRef.current),
+        cloneDeep(originalDraftNodesRef.current ?? []),
+        cloneDeep(originalDraftEdgesRef.current ?? []),
         "Current Draft",
         null,
       );
@@ -214,8 +214,8 @@ export function useFlowVersionSidebar(flowId: string) {
         const wasRestored = useVersionPreviewStore.getState().didRestore;
         if (!wasRestored) {
           useFlowStore.setState({
-            nodes: cloneDeep(originalDraftNodesRef.current),
-            edges: cloneDeep(originalDraftEdgesRef.current),
+            nodes: cloneDeep(originalDraftNodesRef.current ?? []),
+            edges: cloneDeep(originalDraftEdgesRef.current ?? []),
           });
         }
       } catch (err) {

@@ -90,10 +90,10 @@ import isWrappedWithClass from "./utils/is-wrapped-with-class";
 
 export default function Page({
   view,
-  setIsLoading,
+  setIsLoading = () => {},
 }: {
   view?: boolean;
-  setIsLoading: (isLoading: boolean) => void;
+  setIsLoading?: (isLoading: boolean) => void;
 }): JSX.Element {
   const { t } = useTranslation();
   const uploadFlow = useUploadFlow();

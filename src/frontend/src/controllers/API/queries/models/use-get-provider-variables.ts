@@ -23,7 +23,7 @@ export type ProviderVariablesMapping = Record<string, ProviderVariable[]>;
 export const useGetProviderVariables: useQueryFunctionType<
   undefined,
   ProviderVariablesMapping
-> = (_, options) => {
+> = (options) => {
   const { query } = UseRequestProcessor();
 
   const getProviderVariablesFn =

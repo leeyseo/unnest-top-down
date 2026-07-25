@@ -82,7 +82,7 @@ export default function PlaygroundPage() {
       const newClientId = uuid();
       const cookieOptions: CookieOptions = {
         secure: window.location.protocol === "https:",
-        sameSite: "Strict",
+        sameSite: "strict",
       };
       setCookie("client_id", newClientId, cookieOptions);
       setClientId(newClientId);

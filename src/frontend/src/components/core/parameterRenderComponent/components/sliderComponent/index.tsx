@@ -51,7 +51,10 @@ export default function SliderComponent({
   sliderButtonsOptions = DEFAULT_SLIDER_BUTTONS_OPTIONS,
   handleOnNewValue,
   showParameter = true,
-}: InputProps<string[] | number[], SliderComponentType>): JSX.Element | null {
+}: InputProps<
+  string | number | string[] | number[],
+  Omit<SliderComponentType, "value">
+>): JSX.Element | null {
   const min = rangeSpec?.min ?? -2;
   const max = rangeSpec?.max ?? 2;
 

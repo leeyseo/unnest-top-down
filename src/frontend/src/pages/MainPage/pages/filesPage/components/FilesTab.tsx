@@ -48,7 +48,7 @@ const FilesTab = ({
   isShiftPressed,
 }: FilesTabProps) => {
   const { t } = useTranslation();
-  const tableRef = useRef<AgGridReact<FileType>>(null);
+  const tableRef = useRef<AgGridReact<unknown>>(null);
   const { data: files } = useGetFilesV2();
   const setErrorData = useAlertStore((state) => state.setErrorData);
   const setSuccessData = useAlertStore((state) => state.setSuccessData);
@@ -56,6 +56,7 @@ const FilesTab = ({
   const { mutate: rename } = usePostRenameFileV2();
   const { mutate: deleteFiles, isPending: isDeleting } = useDeleteFilesV2();
   const handleRename = (params: NewValueParams<FileType, string>) => {
+    if (!params.newValue) return;
     rename({
       id: params.data.id,
       name: params.newValue,

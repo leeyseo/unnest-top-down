@@ -477,11 +477,11 @@ export type ApiKeyType = {
   onCloseModal?: () => void;
   modalProps?: {
     title?: string;
-    description?: string | ReactElement | HTMLElement;
-    inputLabel?: string | ReactElement | HTMLElement | ReactNode;
+    description?: ReactNode;
+    inputLabel?: ReactNode;
     inputPlaceholder?: string;
     buttonText?: string;
-    generatedKeyMessage?: string | ReactElement | HTMLElement;
+    generatedKeyMessage?: ReactNode;
     showIcon?: boolean;
     size?:
       | "x-small"

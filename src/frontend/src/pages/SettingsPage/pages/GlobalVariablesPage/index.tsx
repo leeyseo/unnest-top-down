@@ -7,9 +7,15 @@ import type {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import Dropdown from "@/components/core/dropdownComponent";
 import GlobalVariableModal from "@/components/core/GlobalVariableModal/GlobalVariableModal";
 import TableComponent from "@/components/core/parameterRenderComponent/components/tableComponent";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { PROVIDER_VARIABLE_MAPPING } from "@/constants/providerConstants";
 import {
   useDeleteGlobalVariables,
@@ -42,9 +48,18 @@ export default function GlobalVariablesPage() {
 
   const DropdownEditor = ({ options, value, onValueChange }) => {
     return (
-      <Dropdown options={options} value={value} onSelect={onValueChange}>
-        <div className="-mt-1.5 w-full"></div>
-      </Dropdown>
+      <Select value={value} onValueChange={onValueChange}>
+        <SelectTrigger id="global-variable-type" className="h-full border-0">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {options.map((option) => (
+            <SelectItem key={option} value={option}>
+              {option}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     );
   };
   // Column Definitions: Defines the columns to be displayed.

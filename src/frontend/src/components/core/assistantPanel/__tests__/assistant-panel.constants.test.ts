@@ -7,8 +7,8 @@ import {
 
 describe("assistant-panel.constants", () => {
   describe("ASSISTANT_TITLE", () => {
-    it("should be Langflow Assistant", () => {
-      expect(ASSISTANT_TITLE).toBe("Langflow Assistant");
+    it("should be Unnest Assistant", () => {
+      expect(ASSISTANT_TITLE).toBe("Unnest Assistant");
     });
   });
 

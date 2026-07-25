@@ -13,7 +13,7 @@ import NoInputView from "./components/no-input";
 import { useAudioRecording } from "./hooks/use-audio-recording";
 
 interface ChatInputProps
-  extends Omit<ChatInputType, "sendMessage" | "inputRef"> {
+  extends Omit<ChatInputType, "sendMessage" | "inputRef" | "playgroundPage"> {
   sendMessage: (params: {
     inputValue: string;
     files: string[];

@@ -30,7 +30,7 @@ jest.mock("@/customization/config-constants", () => ({
 }));
 
 // Mocking the customization layer for the user avatar is how we prove the
-// Desktop Langflow Assistant avatar bug is fixed: the component must render
+// Desktop Unnest Assistant avatar bug is fixed: the component must render
 // CustomProfileIcon (which the Desktop customization overrides to prepend an
 // absolute baseURL), not a bare <img> with a relative URL.
 jest.mock("@/customization/components/custom-profile-icon", () => ({
@@ -42,8 +42,6 @@ jest.mock("@/customization/components/custom-profile-icon", () => ({
     />
   ),
 }));
-
-jest.mock("@/assets/langflow_assistant.svg", () => "langflow-icon.svg");
 
 jest.mock("../assistant-component-result", () => ({
   AssistantComponentResult: ({
@@ -171,7 +169,7 @@ describe("AssistantMessageItem", () => {
       expect(screen.getByAltText("User")).toBeInTheDocument();
     });
 
-    // Regression guard: Langflow Desktop shipped with a broken user avatar in
+    // Regression guard: the desktop build shipped with a broken user avatar in
     // the Assistant panel because the bare <img> used a relative URL that
     // resolved against the Tauri origin instead of the Python sidecar. The
     // fix routes the avatar through CustomProfileIcon so Desktop's
@@ -211,7 +209,7 @@ describe("AssistantMessageItem", () => {
   });
 
   describe("assistant messages", () => {
-    it("should render assistant label with Langflow icon", () => {
+    it("should render the Unnest Assistant label and mark", () => {
       const message = createMessage({
         role: "assistant",
         content: "Here is your component",
@@ -220,8 +218,10 @@ describe("AssistantMessageItem", () => {
 
       render(<AssistantMessageItem message={message} />);
 
-      expect(screen.getByText("Langflow Assistant")).toBeInTheDocument();
-      expect(screen.getByAltText("Langflow Assistant")).toBeInTheDocument();
+      expect(screen.getByText("Unnest Assistant")).toBeInTheDocument();
+      expect(
+        screen.getByRole("img", { name: "Unnest Assistant" }),
+      ).toBeInTheDocument();
     });
   });
 

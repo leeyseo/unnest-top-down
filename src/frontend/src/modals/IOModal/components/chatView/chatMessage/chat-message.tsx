@@ -74,13 +74,21 @@ export default function ChatMessage({
         setIsStreaming(false);
         eventSource.current?.close();
         setStreamUrl(undefined);
-        if (JSON.parse(event.data)?.error) {
+        let streamError: string | undefined;
+        try {
+          streamError = event.data
+            ? JSON.parse(event.data)?.error
+            : undefined;
+        } catch {
+          // EventSource errors do not always contain JSON data.
+        }
+        if (streamError) {
           setErrorData({
             title: t("errors.errorOnStreaming"),
-            list: [JSON.parse(event.data)?.error],
+            list: [streamError],
           });
         }
-        updateChat(chat, chatMessageRef.current);
+        updateChat?.(chat, chatMessageRef.current);
         reject(new Error("Streaming failed"));
       };
       eventSource.current.addEventListener("close", (event) => {
@@ -146,7 +154,7 @@ export default function ChatMessage({
       },
       {
         onSuccess: () => {
-          updateChat(chat, message);
+          updateChat?.(chat, message);
           setEditMessage(false);
         },
         onError: () => {
@@ -298,8 +306,8 @@ export default function ChatMessage({
                 )}
                 {!chat.isSend && (
                   <MessageMetadata
-                    duration={chat.properties?.build_duration}
-                    usage={chat.properties?.usage}
+                    duration={chat.properties?.build_duration ?? undefined}
+                    usage={chat.properties?.usage ?? undefined}
                     timestamp={chat.timestamp}
                   />
                 )}

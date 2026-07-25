@@ -142,13 +142,10 @@ describe("McpJsonContent", () => {
     expect(screen.getByTestId("tab-wsl")).toBeInTheDocument();
   });
 
-  it("renders setup guide link", () => {
+  it("renders setup guide text without an external link", () => {
     render(<McpJsonContent {...defaultProps} />);
-    const link = screen.getByText("setup guide").closest("a");
-    expect(link).toHaveAttribute(
-      "href",
-      expect.stringContaining("docs.langflow.org"),
-    );
+    expect(screen.getByText("setup guide")).toBeInTheDocument();
+    expect(screen.getByText("setup guide").closest("a")).toBeNull();
   });
 
   it("renders with selected platform", () => {

@@ -48,11 +48,11 @@ export const useDeleteMCPServer: useMutationFunctionType<
     MCPServerType
   > = mutate(["useDeleteMCPServer"], deleteMCPServer, {
     ...options,
-    onSuccess: (data, variables, context) => {
+    onSuccess: (...args) => {
       queryClient.refetchQueries({
         queryKey: ["useGetMCPServers"],
       });
-      options?.onSuccess?.(data, variables, context);
+      options?.onSuccess?.(...args);
     },
   });
 

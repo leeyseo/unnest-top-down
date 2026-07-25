@@ -311,26 +311,40 @@ export type useQueryFunctionType<
   O = {},
 > = T extends undefined
   ? (
-      options?: Omit<UseQueryOptions, "queryFn" | "queryKey"> & O,
+      options?: Omit<
+        UseQueryOptions<R, Error, R>,
+        "queryFn" | "queryKey"
+      > &
+        O,
     ) => UseQueryResult<R>
   : (
       params: T,
-      options?: Omit<UseQueryOptions, "queryFn" | "queryKey"> & O,
+      options?: Omit<
+        UseQueryOptions<R, Error, R>,
+        "queryFn" | "queryKey"
+      > &
+        O,
     ) => UseQueryResult<R>;
 
 export type QueryFunctionType = (
-  queryKey: UseQueryOptions["queryKey"],
-  queryFn: UseQueryOptions["queryFn"],
-  options?: Omit<UseQueryOptions, "queryKey" | "queryFn">,
+  queryKey: UseQueryOptions<any, any, any, any>["queryKey"],
+  queryFn: UseQueryOptions<any, any, any, any>["queryFn"],
+  options?: Omit<
+    UseQueryOptions<any, any, any, any>,
+    "queryKey" | "queryFn"
+  >,
   // biome-ignore lint/suspicious/noExplicitAny: legacy
 ) => UseQueryResult<any>;
 
 export type MutationFunctionType = (
   mutationKey: UseMutationOptions["mutationKey"],
   // biome-ignore lint/suspicious/noExplicitAny: legacy
-  mutationFn: UseMutationOptions<any, any, any>["mutationFn"],
+  mutationFn: UseMutationOptions<any, any, any, any>["mutationFn"],
   // biome-ignore lint/suspicious/noExplicitAny: legacy
-  options?: Omit<UseMutationOptions<any, any>, "mutationFn" | "mutationKey">,
+  options?: Omit<
+    UseMutationOptions<any, any, any, any>,
+    "mutationFn" | "mutationKey"
+  >,
   // biome-ignore lint/suspicious/noExplicitAny: legacy
 ) => UseMutationResult<any, any, any, any>;
 
@@ -345,14 +359,14 @@ export type useMutationFunctionType<
 > = Params extends undefined
   ? (
       options?: Omit<
-        UseMutationOptions<Data, Error>,
+        UseMutationOptions<Data, Error, Variables>,
         "mutationFn" | "mutationKey"
       >,
     ) => UseMutationResult<Data, Error, Variables>
   : (
       params: Params,
       options?: Omit<
-        UseMutationOptions<Data, Error>,
+        UseMutationOptions<Data, Error, Variables>,
         "mutationFn" | "mutationKey"
       >,
     ) => UseMutationResult<Data, Error, Variables>;

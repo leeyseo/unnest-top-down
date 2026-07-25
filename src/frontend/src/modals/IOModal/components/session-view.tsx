@@ -11,6 +11,7 @@ import {
   useUpdateMessage,
 } from "@/controllers/API/queries/messages";
 import useFlowStore from "@/stores/flowStore";
+import type { Message } from "@/types/messages";
 import TableComponent from "../../../components/core/parameterRenderComponent/components/tableComponent";
 import useAlertStore from "../../../stores/alertStore";
 import { useMessagesStore } from "../../../stores/messagesStore";
@@ -55,12 +56,8 @@ export default function SessionView({
 
   // Update messages store when data is fetched
   useEffect(() => {
-    if (queryData && typeof queryData === "object" && "rows" in queryData) {
-      const rowsData = queryData.rows as { data?: unknown[] } | undefined;
-      if (rowsData && typeof rowsData === "object" && "data" in rowsData) {
-        const fetchedMessages = rowsData.data || [];
-        setMessages(fetchedMessages);
-      }
+    if (queryData?.rows.data) {
+      setMessages(queryData.rows.data);
     }
   }, [queryData, setMessages]);
 
@@ -105,7 +102,7 @@ export default function SessionView({
   const { mutate: updateMessageMutation } = useUpdateMessage();
 
   function handleUpdateMessage(
-    event: NewValueParams<Record<string, unknown>, string>,
+    event: NewValueParams<Message, string>,
   ) {
     const newValue = event.newValue;
     const field = event.column.getColId();
@@ -128,7 +125,8 @@ export default function SessionView({
           setErrorData({
             title: t("errors.updatingMessages"),
           });
-          event.data[field] = event.oldValue;
+          (event.data as Message & Record<string, unknown>)[field] =
+            event.oldValue;
           event.api.refreshCells();
         },
       },

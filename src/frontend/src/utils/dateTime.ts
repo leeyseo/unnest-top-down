@@ -1,7 +1,7 @@
 const pad2 = (num: number): string => String(num).padStart(2, "0");
 
 const hasExplicitTimezone = (value: string): boolean =>
-  /([zZ]|[+-]\d{2}:?\d{2})$/.test(value);
+  /(\sUTC|[zZ]|[+-]\d{2}:?\d{2})$/i.test(value);
 
 export const parseApiTimestamp = (value: unknown): Date | null => {
   if (value === null || value === undefined) return null;
@@ -14,9 +14,7 @@ export const parseApiTimestamp = (value: unknown): Date | null => {
 
   const normalized = hasExplicitTimezone(raw)
     ? raw
-    : raw.includes("T")
-      ? `${raw}Z`
-      : raw;
+    : `${raw.replace(" ", "T")}Z`;
 
   const date = new Date(normalized);
   return Number.isNaN(date.getTime()) ? null : date;
@@ -37,13 +35,13 @@ export const formatSmartTimestamp = (value: unknown): string => {
   }).format(date);
 
   const isToday =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
+    date.getUTCFullYear() === now.getUTCFullYear() &&
+    date.getUTCMonth() === now.getUTCMonth() &&
+    date.getUTCDate() === now.getUTCDate();
 
   if (isToday) return time;
 
-  const sameYear = date.getFullYear() === now.getFullYear();
+  const sameYear = date.getUTCFullYear() === now.getUTCFullYear();
   if (sameYear) {
     return new Intl.DateTimeFormat(undefined, {
       day: "2-digit",
@@ -56,6 +54,6 @@ export const formatSmartTimestamp = (value: unknown): string => {
     }).format(date);
   }
 
-  const ddmmyyyy = `${pad2(date.getDate())}/${pad2(date.getMonth() + 1)}/${date.getFullYear()}`;
+  const ddmmyyyy = `${pad2(date.getUTCDate())}/${pad2(date.getUTCMonth() + 1)}/${date.getUTCFullYear()}`;
   return `${ddmmyyyy} ${time}`;
 };

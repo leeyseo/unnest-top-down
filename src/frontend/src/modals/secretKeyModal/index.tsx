@@ -20,18 +20,12 @@ export interface ModalConfigProps {
   showIcon?: boolean;
 }
 
-interface SecretKeyModalProps {
-  userId?: string;
-  size?: string;
-  modalProps?: ModalConfigProps;
-}
-
 export default function SecretKeyModal({
   children,
   data,
   onCloseModal,
   modalProps,
-}: ApiKeyType & { modalProps: SecretKeyModalProps }) {
+}: ApiKeyType) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [apiKeyName, setApiKeyName] = useState(data?.apikeyname ?? "");
@@ -42,7 +36,7 @@ export default function SecretKeyModal({
   const setSuccessData = useAlertStore((state) => state.setSuccessData);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const generateToken = useGenerateToken();
-  const modalConfigProps = modalProps?.modalProps ?? modalProps;
+  const modalConfigProps = modalProps;
 
   useEffect(() => {
     if (open) {

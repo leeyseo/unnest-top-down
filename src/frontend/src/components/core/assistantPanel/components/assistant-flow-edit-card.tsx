@@ -160,25 +160,18 @@ export function FlowEditCarousel({
           const field = parts[6];
           setNodes((prevNodes) =>
             prevNodes.map((node, i) => {
-              if (i !== nodeIdx) return node;
-              const template = (node.data as Record<string, unknown>)?.node as
-                | Record<string, unknown>
-                | undefined;
-              if (!template?.template) return node;
-              const tmpl = template.template as Record<
-                string,
-                Record<string, unknown>
-              >;
-              if (!tmpl[field]) return node;
+              if (i !== nodeIdx || node.type !== "genericNode") return node;
+              const template = node.data.node.template;
+              if (!template[field]) return node;
               return {
                 ...node,
                 data: {
                   ...node.data,
                   node: {
-                    ...(node.data as Record<string, unknown>).node,
+                    ...node.data.node,
                     template: {
-                      ...tmpl,
-                      [field]: { ...tmpl[field], value: op.value },
+                      ...template,
+                      [field]: { ...template[field], value: op.value },
                     },
                   },
                 },

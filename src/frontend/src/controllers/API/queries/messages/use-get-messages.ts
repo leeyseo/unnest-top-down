@@ -5,6 +5,7 @@ import useFlowsManagerStore from "@/stores/flowsManagerStore";
 import { useMessagesStore } from "@/stores/messagesStore";
 import { isAuthenticatedPlayground } from "@/modals/IOModal/helpers/playground-auth";
 import type { useQueryFunctionType } from "../../../../types/api";
+import type { Message } from "../../../../types/messages";
 import {
   extractColumnsFromRows,
   prepareSessionIdForAPI,
@@ -21,7 +22,7 @@ interface MessagesQueryParams {
 }
 
 interface MessagesResponse {
-  rows: Array<object>;
+  rows: { data: Message[] };
   columns: Array<ColDef | ColGroupDef>;
 }
 
