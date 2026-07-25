@@ -12,7 +12,7 @@ export function ProfileIcon({ className }: ProfileIconProps = {}) {
   const { t } = useTranslation();
 
   const profileImageUrl = `${BASE_URL_API}files/profile_pictures/${
-    userData?.profile_image ?? "Space/046-rocket.svg"
+    userData?.profile_image ?? "Birds/01-owl.svg"
   }`;
 
   return (
