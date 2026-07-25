@@ -82,12 +82,6 @@ jest.mock("../HelpDropdown", () => ({
   default: () => <div data-testid="help-dropdown" />,
 }));
 
-jest.mock("@/assets/langflow_assistant.svg", () => "mock-assistant-icon.svg");
-jest.mock(
-  "@/assets/langflow_assistant_idle.svg",
-  () => "mock-assistant-idle-icon.svg",
-);
-
 jest.mock("@/stores/assistantManagerStore", () => ({
   __esModule: true,
   default: jest.fn((selector) => {
@@ -129,7 +123,9 @@ describe("CanvasControls", () => {
     render(<CanvasControls selectedNode={null} />);
 
     expect(screen.getByText("New")).toBeInTheDocument();
-    expect(screen.getByAltText("Langflow Assistant")).toBeInTheDocument();
+    expect(
+      screen.getByRole("img", { name: "Unnest Assistant" }),
+    ).toBeInTheDocument();
   });
 
   it("should_render_sticky_note_button", () => {

@@ -1,5 +1,5 @@
 import { type Connection, Handle, Position } from "@xyflow/react";
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useDarkStore } from "@/stores/darkStore";
 import useFlowStore from "@/stores/flowStore";
@@ -33,121 +33,40 @@ const HandleContent = memo(function HandleContent({
   isNullHandle,
   isMuted,
   handleColor,
-  accentForegroundColorName,
   isHovered,
   openHandle,
   testIdComplement,
   title,
   showNode,
   left,
-  nodeId,
 }: {
   isNullHandle: boolean;
   isMuted: boolean;
   handleColor: string;
-  accentForegroundColorName: string;
   isHovered: boolean;
   openHandle: boolean;
   testIdComplement?: string;
   title: string;
   showNode: boolean;
   left: boolean;
-  nodeId: string;
 }) {
-  // Restore animation effect
-  useEffect(() => {
-    if ((isHovered || openHandle) && !isNullHandle) {
-      const styleSheet = document.createElement("style");
-      styleSheet.id = `pulse-${nodeId}`;
-      styleSheet.textContent = `
-        @keyframes pulseNeon-${nodeId} {
-          0% {
-            box-shadow: 0 0 0 3px hsl(var(--node-ring)),
-                        0 0 2px ${handleColor},
-                        0 0 4px ${handleColor},
-                        0 0 6px ${handleColor},
-                        0 0 8px ${handleColor},
-                        0 0 10px ${handleColor},
-                        0 0 15px ${handleColor},
-                        0 0 20px ${handleColor};
-          }
-          50% {
-            box-shadow: 0 0 0 3px hsl(var(--node-ring)),
-                        0 0 4px ${handleColor},
-                        0 0 8px ${handleColor},
-                        0 0 12px ${handleColor},
-                        0 0 16px ${handleColor},
-                        0 0 20px ${handleColor},
-                        0 0 25px ${handleColor},
-                        0 0 30px ${handleColor};
-          }
-          100% {
-            box-shadow: 0 0 0 3px hsl(var(--node-ring)),
-                        0 0 2px ${handleColor},
-                        0 0 4px ${handleColor},
-                        0 0 6px ${handleColor},
-                        0 0 8px ${handleColor},
-                        0 0 10px ${handleColor},
-                        0 0 15px ${handleColor},
-                        0 0 20px ${handleColor};
-          }
-        }
-      `;
-      document.head.appendChild(styleSheet);
-
-      return () => {
-        const existingStyle = document.getElementById(`pulse-${nodeId}`);
-        if (existingStyle) {
-          existingStyle.remove();
-        }
-      };
-    }
-  }, [isHovered, openHandle, isNullHandle, nodeId, handleColor]);
-
-  const getNeonShadow = useCallback(
-    (color: string, isActive: boolean) => {
-      if (isNullHandle || isMuted) return "none";
-      if (!isActive) return `0 0 0 3px ${color}`;
-      return [
-        "0 0 0 1px hsl(var(--border))",
-        `0 0 2px ${color}`,
-        `0 0 4px ${color}`,
-        `0 0 6px ${color}`,
-        `0 0 8px ${color}`,
-        `0 0 10px ${color}`,
-        `0 0 15px ${color}`,
-        `0 0 20px ${color}`,
-      ].join(", ");
-    },
-    [isNullHandle, isMuted],
-  );
-
   const contentStyle = useMemo(
     () => ({
       background: isNullHandle ? "hsl(var(--border))" : handleColor,
-      width: isMuted && !isNullHandle ? "6px" : "10px",
-      height: isMuted && !isNullHandle ? "6px" : "10px",
-      transition: "all 0.2s",
+      width: isMuted && !isNullHandle ? "5px" : "8px",
+      height: isMuted && !isNullHandle ? "8px" : "11px",
+      borderRadius: "50% 50% 45% 45% / 58% 58% 42% 42%",
+      transition: "box-shadow 150ms ease, opacity 150ms ease",
       opacity: isMuted && !isNullHandle ? 0 : 1,
-      boxShadow: getNeonShadow(
-        accentForegroundColorName,
-        isHovered || openHandle,
-      ),
-      animation:
-        (isHovered || openHandle) && !isNullHandle && !isMuted
-          ? `pulseNeon-${nodeId} 1.1s ease-in-out infinite`
-          : "none",
+      boxShadow:
+        isMuted && !isNullHandle
+          ? "none"
+          : `0 0 0 2px hsl(var(--background)), 0 0 0 ${
+              isHovered || openHandle ? "4px" : "3px"
+            } ${isNullHandle ? "hsl(var(--border))" : handleColor}`,
       border: isNullHandle ? "2px solid hsl(var(--muted))" : "none",
     }),
-    [
-      isNullHandle,
-      isMuted,
-      handleColor,
-      getNeonShadow,
-      accentForegroundColorName,
-      isHovered,
-      openHandle,
-    ],
+    [isNullHandle, isMuted, handleColor, isHovered, openHandle],
   );
 
   return (
@@ -261,7 +180,6 @@ const HandleRenderComponent = memo(function HandleRenderComponent({
     isNullHandle,
     isMuted,
     handleColor,
-    accentForegroundColorName,
   } = useMemo(() => {
     const sameDraggingNode =
       (!left ? handleDragging?.target : handleDragging?.source) === nodeId;
@@ -337,12 +255,6 @@ const HandleRenderComponent = memo(function HandleRenderComponent({
           ? "hsl(var(--secondary-foreground))"
           : "hsl(var(--datatype-" + firstUniqueColor + "))";
 
-    const accentForegroundColorName = connectedEdge
-      ? "hsl(var(--datatype-" + connectedColor + "-foreground))"
-      : uniqueColorCount > 1
-        ? "hsl(var(--input))"
-        : "hsl(var(--datatype-" + firstUniqueColor + "-foreground))";
-
     const currentFilter = left
       ? {
           targetHandle: myId,
@@ -368,7 +280,6 @@ const HandleRenderComponent = memo(function HandleRenderComponent({
     return {
       sameNode: sameDraggingNode || sameFilterNode,
       ownHandle: ownDraggingHandle || ownFilterHandle,
-      accentForegroundColorName,
       openHandle,
       filterOpenHandle,
       filterPresent,
@@ -486,14 +397,12 @@ const HandleRenderComponent = memo(function HandleRenderComponent({
             isNullHandle={isNullHandle ?? false}
             isMuted={isMuted ?? false}
             handleColor={handleColor}
-            accentForegroundColorName={accentForegroundColorName}
             isHovered={isHovered}
             openHandle={openHandle}
             testIdComplement={testIdComplement}
             title={title}
             showNode={showNode}
             left={left}
-            nodeId={nodeId}
           />
         </Handle>
       </ShadTooltip>

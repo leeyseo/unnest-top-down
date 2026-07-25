@@ -1,14 +1,15 @@
 import { memo, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { COLOR_OPTIONS } from "@/constants/constants";
-import type { NoteDataType } from "@/types/flow";
+import type { AllNodeType, NoteDataType } from "@/types/flow";
+import type { FlowStoreType } from "@/types/zustand/flow";
 import { cn } from "@/utils/utils";
 
 interface ColorPickerButtonsProps {
   bgColor: string;
   data: NoteDataType;
   /** Flow store's setNode function for updating node data */
-  setNode: (id: string, updater: (node: any) => any) => void;
+  setNode: FlowStoreType["setNode"];
 }
 
 export const ColorPickerButtons = memo(
@@ -20,20 +21,24 @@ export const ColorPickerButtons = memo(
     /** Updates the node's background color in the flow store */
     const updateBackgroundColor = useCallback(
       (color: string, isCustom: boolean) => {
-        setNode(data.id, (node) => ({
-          ...node,
-          data: {
-            ...node.data,
-            node: {
-              ...node.data.node,
-              template: {
-                ...node.data.node?.template,
-                backgroundColor: color,
-                customColor: isCustom ? color : undefined,
+        setNode(
+          data.id,
+          (node) =>
+            ({
+              ...node,
+              data: {
+                ...node.data,
+                node: {
+                  ...node.data.node,
+                  template: {
+                    ...node.data.node?.template,
+                    backgroundColor: color,
+                    customColor: isCustom ? color : undefined,
+                  },
+                },
               },
-            },
-          },
-        }));
+            }) as AllNodeType,
+        );
       },
       [data.id, setNode],
     );
@@ -57,8 +62,7 @@ export const ColorPickerButtons = memo(
             <div
               className={cn(
                 "h-4 w-4 rounded-full hover:border hover:border-ring",
-                bgColor === colorKey &&
-                  "border-2 border-accent-indigo-foreground",
+                bgColor === colorKey && "border-2 border-primary",
                 colorValue === null && "border",
               )}
               style={{ backgroundColor: colorValue ?? "#00000000" }}
@@ -75,7 +79,7 @@ export const ColorPickerButtons = memo(
           <div
             className={cn(
               "relative flex h-4 w-4 items-center justify-center overflow-hidden rounded-full border hover:border-ring",
-              isCustomColor && "border-2 border-accent-indigo-foreground",
+              isCustomColor && "border-2 border-primary",
             )}
           >
             <div

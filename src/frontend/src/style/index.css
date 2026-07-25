@@ -124,10 +124,10 @@
     --jse-info-color: hsl(221, 83%, 53%);
     --jse-success-color: hsl(142, 76%, 36%);
 
-    --node-selected: 243 75% 59%;
+    --node-selected: 86.25 68.97% 22.75%;
     --round-btn-shadow: #00000063;
     --ice: #31a3cc;
-    --selected: #2196f3;
+    --selected: hsl(var(--primary));
 
     --error-background: #fef2f2;
     --error-foreground: #991b1b;
@@ -168,7 +168,7 @@
     --status-green: #4ade80;
     --status-blue: #2563eb;
     --status-gray: #6b7280;
-    --connection: #555;
+    --connection: #a1a1aa;
 
     --note-amber: 48 96.6% 76.7%; /* hsl(48, 96.6%, 76.7%) */
     --note-neutral: 240 5.9% 90%; /* hsl(240, 5.9%, 90%) */
@@ -415,12 +415,12 @@
     --warning-foreground: 240 6% 10%; /* hsl(240, 6%, 10%) */
     --warning-text: 0 0% 100%; /* hsl(0, 0%, 100%) */
 
-    --node-selected: 234 89% 74%;
+    --node-selected: 81.97 84.52% 67.06%;
 
     --ice: #60a5fa;
     --hover: #1a202e;
     --disabled-run: #6366f1;
-    --selected: #0369a1;
+    --selected: hsl(var(--primary));
 
     --filter-foreground: #eef2ff;
     --filter-background: #4e46e599;
@@ -452,7 +452,7 @@
     --chat-send: #ffffff;
     --status-green: #4ade80;
     --status-blue: #2563eb;
-    --connection: #6d6c6c;
+    --connection: #71717a;
     --code-background: 240 6% 10%;
     --code-description-background: 0 0% 0%;
     --code-foreground: 240 6% 90%;

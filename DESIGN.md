@@ -77,11 +77,11 @@ colors:
   # Canvas and node system
   canvas: "#F4F4F5"
   canvas-dot: "#A1A1AA"
-  node-selected: "#4F46E5"
+  node-selected: "#3F6212"
   node-ring: "#E4E4E7"
-  connection: "#555555"
+  connection: "#A1A1AA"
   hover: "#F2F4F5"
-  selected: "#2196F3"
+  selected: "#3F6212"
 
   # Code blocks
   code-background: "#18181B"
@@ -634,17 +634,17 @@ Elevation is minimal and functional. The design avoids heavy shadows, instead us
 
 ### Level 0: Canvas
 
-The infinite workspace background. A dotted grid pattern provides spatial orientation without visual noise.
+The infinite workspace background. A quiet 1px dotted grid at 24px intervals provides spatial orientation without competing with the flow.
 
-- **Light mode:** Zinc-gray (#F4F4F5) background with medium-gray dots (#A1A1AA).
-- **Dark mode:** Pure black (#000000) background with dark zinc dots (#3F3F46).
+- **Light mode:** Zinc-gray (#F4F4F5) background with 45%-opacity gray dots (#A1A1AA).
+- **Dark mode:** Pure black (#000000) background with 35%-opacity dark zinc dots (#3F3F46).
 
 ### Level 1: Nodes & Cards
 
-Content containers that sit on the canvas. White background with a soft ambient shadow.
+Content containers that sit on the canvas. Neutral cards use a 3px Nest Green rail on the left as the shared Unnest signature.
 
-- **Shadow:** `0 0px 15px -3px rgba(0,0,0,0.1), 0 0px 6px -4px rgba(0,0,0,0.1)` -- barely perceptible, just enough to lift nodes off the grid.
-- **Selected state:** An indigo ring (#4F46E5) replaces the default border, immediately communicating focus.
+- **Shadow:** `0 1px 2px rgba(0,0,0,0.04)` at rest and a restrained green-tinted ambient shadow on hover.
+- **Selected state:** A Nest Green border with a 15%-opacity 2px ring communicates focus. Error, warning, and frozen borders keep semantic priority.
 - **Frozen state:** A special icy glow effect -- `0 0 10px 2px rgba(128,190,230,0.5)` shadow with a 2px `rgba(128,190,219,0.86)` border and frosted overlay. Signals the node is locked from editing.
 
 ### Level 2: Popovers & Modals
@@ -731,12 +731,13 @@ Rounded bordered containers with icon + text layout. Default variant uses standa
 
 ### Canvas Nodes
 
-The core UI element of Unnest. Each node is a white rounded card on the canvas containing typed input/output ports, configuration fields, and a status indicator.
+The core UI element of Unnest. Each node is a neutral `rounded-lg` card with a thin Nest Green rail, typed input/output ports, configuration fields, and a status indicator.
 
-- **Port dots** use the data type color system to visually encode connection compatibility. When two ports share a compatible type, their colors match, providing immediate visual feedback.
-- **Selected nodes** show an indigo ring (`node-selected: #4F46E5`) replacing the standard border.
+- **Ports:** The visible port is an 8×11px vertical egg shape inside an unchanged 32px interaction area. Ports retain the data type color system but use a simple outline on hover instead of neon pulses or glow.
+- **Connections:** Neutral 1.5px Bézier lines preserve the existing routing. Selected lines use the source data type color at 2px, falling back to Nest Green; loop outputs remain dashed.
+- **Selected nodes:** A Nest Green ring (`node-selected: #3F6212`) replaces the standard border.
 - **Frozen nodes** display the icy glow effect with a frosted overlay, signaling they are locked from modification.
-- **Node toolbar** appears on hover/selection: a floating `rounded-xl` container with icon buttons, 1px border, and `shadow-sm`.
+- **Canvas controls and toolbars:** Floating `rounded-xl` containers use a translucent neutral surface, subtle border, `shadow-sm`, and Nest Green active states.
 - **Status indicators:** Green (built successfully), red (error), yellow (building), gray (idle). A spinner animation shows during active builds.
 
 ### Sidebar

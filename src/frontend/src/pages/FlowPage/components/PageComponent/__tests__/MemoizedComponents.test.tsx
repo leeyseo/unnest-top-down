@@ -1,6 +1,9 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoizedSidebarTrigger } from "../MemoizedComponents";
+import {
+  MemoizedBackground,
+  MemoizedSidebarTrigger,
+} from "../MemoizedComponents";
 
 jest.mock("@/components/core/canvasControlsComponent/CanvasControls", () => ({
   __esModule: true,
@@ -56,12 +59,40 @@ jest.mock("../../flowSidebarComponent", () => ({
 
 // Mock the Panel component
 jest.mock("@xyflow/react", () => ({
+  Background: ({ id, size, gap, className }: any) => (
+    <div
+      data-testid="canvas-background"
+      data-id={id}
+      data-size={size}
+      data-gap={gap}
+      className={className}
+    />
+  ),
   Panel: ({ children, className, position }: any) => (
     <div data-testid="panel" data-position={position} className={className}>
       {children}
     </div>
   ),
 }));
+
+describe("MemoizedBackground", () => {
+  it("uses the quiet Unnest canvas grid", () => {
+    render(<MemoizedBackground />);
+
+    expect(screen.getByTestId("canvas-background")).toHaveAttribute(
+      "data-size",
+      "1",
+    );
+    expect(screen.getByTestId("canvas-background")).toHaveAttribute(
+      "data-gap",
+      "24",
+    );
+    expect(screen.getByTestId("canvas-background")).toHaveClass(
+      "opacity-45",
+      "dark:opacity-35",
+    );
+  });
+});
 
 // Mock CanvasControlButton
 jest.mock(
@@ -184,7 +215,7 @@ describe("MemoizedSidebarTrigger", () => {
         "!m-2",
         "flex",
         "gap-1.5",
-        "rounded-md",
+        "rounded-xl",
       );
     });
 

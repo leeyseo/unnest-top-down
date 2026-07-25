@@ -10,14 +10,16 @@ const ConnectionLineComponent = ({
 }: ConnectionLineComponentProps): JSX.Element => {
   const handleDragging = useFlowStore((state) => state.handleDragging);
   const color = handleDragging?.color;
-  const accentColor = `hsl(var(--datatype-${color}))`;
+  const accentColor = color
+    ? `hsl(var(--datatype-${color}))`
+    : "hsl(var(--primary))";
 
   return (
     <g>
       <path
         fill="none"
         // ! Replace hash # colors here
-        strokeWidth={2}
+        strokeWidth={1.5}
         className={`animated`}
         style={{
           stroke: handleDragging ? accentColor : "",
@@ -25,11 +27,12 @@ const ConnectionLineComponent = ({
         }}
         d={`M${fromX},${fromY} C ${fromX} ${toY} ${fromX} ${toY} ${toX},${toY}`}
       />
-      <circle
+      <ellipse
         cx={toX}
         cy={toY}
-        fill="#fff"
-        r={5}
+        fill="hsl(var(--background))"
+        rx={4}
+        ry={5.5}
         stroke={accentColor}
         className=""
         strokeWidth={1.5}

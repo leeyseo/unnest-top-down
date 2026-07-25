@@ -229,8 +229,8 @@ export default function NodeStatus({
   const getBaseBorderClass = (selected) => {
     const className =
       selected && !isBuilding
-        ? " border ring-[0.75px] ring-muted-foreground border-muted-foreground hover:shadow-node"
-        : "border ring-[0.5px] hover:shadow-node ring-border";
+        ? "border border-primary ring-2 ring-primary/15"
+        : "border border-border/80";
     const frozenClass = selected ? "border-ring-frozen" : "border-frozen";
     const updateClass =
       isOutdated && !isUserEdited && !dismissAll && isBreakingChange

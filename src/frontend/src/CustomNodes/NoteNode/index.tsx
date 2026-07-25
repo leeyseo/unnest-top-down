@@ -164,7 +164,7 @@ function NoteNode({
           debouncedResize.flush();
         }}
         isVisible={selected}
-        lineClassName="!border !border-muted-foreground"
+        lineClassName="!border !border-primary"
       />
 
       <div
@@ -176,7 +176,8 @@ function NoteNode({
           backgroundColor: resolvedBgColor,
         }}
         className={cn(
-          "relative flex h-full w-full flex-col gap-3 rounded-xl p-3",
+          "relative flex h-full w-full flex-col gap-3 rounded-lg p-3",
+          selected && "ring-2 ring-primary/20",
           "duration-200 ease-in-out",
           "transition-transform",
           hasVisibleBg && `border ${!selected && "-z-50 shadow-sm"}`,

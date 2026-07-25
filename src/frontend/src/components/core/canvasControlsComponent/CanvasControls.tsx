@@ -134,7 +134,7 @@ const CanvasControls = ({
     <>
       <Panel
         data-testid="main_canvas_controls"
-        className="react-flow__controls flex !flex-row items-center gap-1 !overflow-visible rounded-lg bg-background p-1 fill-foreground stroke-foreground text-primary [&>button]:border-0"
+        className="react-flow__controls flex !flex-row items-center gap-1 !overflow-visible rounded-xl border border-border/70 bg-background/95 p-1 fill-foreground stroke-foreground text-primary shadow-sm backdrop-blur-sm [&>button]:border-0"
         position="bottom-center"
       >
         {/* Wrap the assistant button + "New" pill in a Radix Popover so the
@@ -176,7 +176,7 @@ const CanvasControls = ({
                 unstyled
                 size="icon"
                 data-testid="assistant-button"
-                className="group/btn relative flex h-8 w-8 items-center justify-center overflow-hidden rounded-md hover:bg-muted"
+                className="group/btn relative flex h-8 w-8 items-center justify-center overflow-hidden rounded-lg hover:bg-primary/10"
                 onClick={handleAssistantClick}
               >
                 <UnnestLogo
@@ -233,7 +233,7 @@ const CanvasControls = ({
           unstyled
           size="icon"
           data-testid="canvas-add-note-button"
-          className="group flex h-8 w-8 items-center justify-center rounded-md hover:bg-muted"
+          className="group flex h-8 w-8 items-center justify-center rounded-lg hover:bg-primary/10"
           title={t("canvas.addStickyNote")}
           onClick={handleAddNote}
         >
@@ -254,10 +254,10 @@ const CanvasControls = ({
             size="icon"
             data-testid="canvas_controls_toggle_inspector"
             aria-pressed={inspectionPanelVisible}
-            className={`group flex h-8 w-8 items-center justify-center rounded-md ${
+            className={`group flex h-8 w-8 items-center justify-center rounded-lg ${
               inspectionPanelVisible
-                ? "bg-muted text-foreground"
-                : "hover:bg-muted"
+                ? "bg-primary/10 text-primary"
+                : "hover:bg-primary/10"
             }`}
             title={
               !selectedNode

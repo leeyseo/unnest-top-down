@@ -13,7 +13,12 @@ import { cn } from "@/utils/utils";
 import { NAV_ITEMS } from "../flowSidebarComponent/components/sidebarSegmentedNav";
 
 export const MemoizedBackground = memo(() => (
-  <Background id="main-canvas-bg" size={2} gap={20} className="" />
+  <Background
+    id="main-canvas-bg"
+    size={1}
+    gap={24}
+    className="opacity-45 dark:opacity-35"
+  />
 ));
 
 interface MemoizedCanvasControlsProps {
@@ -43,7 +48,7 @@ export const MemoizedSidebarTrigger = memo(() => {
     return (
       <Panel
         className={cn(
-          "react-flow__controls !top-auto !m-2 flex gap-1.5 rounded-md border border-secondary-hover bg-background p-0.5 text-primary shadow transition-all duration-300 [&>button]:border-0 [&>button]:bg-background hover:[&>button]:bg-accent",
+          "react-flow__controls !top-auto !m-2 flex gap-1.5 rounded-xl border border-border/70 bg-background/95 p-0.5 text-primary shadow-sm backdrop-blur-sm transition-all duration-300 [&>button]:border-0 [&>button]:bg-transparent hover:[&>button]:bg-primary/10",
           "pointer-events-auto opacity-100 group-data-[open=true]/sidebar-wrapper:pointer-events-none group-data-[open=true]/sidebar-wrapper:-translate-x-full group-data-[open=true]/sidebar-wrapper:opacity-0",
         )}
         position="top-left"
@@ -71,7 +76,7 @@ export const MemoizedSidebarTrigger = memo(() => {
   return (
     <Panel
       className={cn(
-        "react-flow__controls !top-auto !m-2 flex gap-1.5 rounded-md border border-secondary-hover bg-background p-1.5 text-primary shadow transition-all duration-300 [&>button]:border-0 [&>button]:bg-background hover:[&>button]:bg-accent",
+        "react-flow__controls !top-auto !m-2 flex gap-1.5 rounded-xl border border-border/70 bg-background/95 p-1.5 text-primary shadow-sm backdrop-blur-sm transition-all duration-300 [&>button]:border-0 [&>button]:bg-transparent hover:[&>button]:bg-primary/10",
         "pointer-events-auto opacity-100 group-data-[open=true]/sidebar-wrapper:pointer-events-none group-data-[open=true]/sidebar-wrapper:-translate-x-full group-data-[open=true]/sidebar-wrapper:opacity-0",
       )}
       position="top-left"

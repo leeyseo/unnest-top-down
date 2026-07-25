@@ -159,11 +159,17 @@ describe("model handle muted state", () => {
     const computeContentStyle = (
       isNullHandle: boolean,
       isMuted: boolean,
-    ): { width: string; height: string; opacity: number } => {
+    ): {
+      width: string;
+      height: string;
+      opacity: number;
+      borderRadius: string;
+    } => {
       return {
-        width: isMuted && !isNullHandle ? "6px" : "10px",
-        height: isMuted && !isNullHandle ? "6px" : "10px",
+        width: isMuted && !isNullHandle ? "5px" : "8px",
+        height: isMuted && !isNullHandle ? "8px" : "11px",
         opacity: isMuted && !isNullHandle ? 0 : 1,
+        borderRadius: "50% 50% 45% 45% / 58% 58% 42% 42%",
       };
     };
 
@@ -172,8 +178,8 @@ describe("model handle muted state", () => {
       const style = computeContentStyle(false, true);
 
       // Assert
-      expect(style.width).toBe("6px");
-      expect(style.height).toBe("6px");
+      expect(style.width).toBe("5px");
+      expect(style.height).toBe("8px");
       expect(style.opacity).toBe(0);
     });
 
@@ -182,51 +188,23 @@ describe("model handle muted state", () => {
       const style = computeContentStyle(false, false);
 
       // Assert
-      expect(style.width).toBe("10px");
-      expect(style.height).toBe("10px");
+      expect(style.width).toBe("8px");
+      expect(style.height).toBe("11px");
       expect(style.opacity).toBe(1);
+      expect(style.borderRadius).toBe("50% 50% 45% 45% / 58% 58% 42% 42%");
     });
 
     it("should use null handle styling when isNullHandle overrides isMuted", () => {
-      // isNullHandle takes priority — size stays 10px, opacity stays 1
+      // isNullHandle takes priority — egg size stays visible, opacity stays 1
       // (actual null handle styling uses different background/border, tested elsewhere)
 
       // Arrange & Act
       const style = computeContentStyle(true, true);
 
       // Assert
-      expect(style.width).toBe("10px");
-      expect(style.height).toBe("10px");
+      expect(style.width).toBe("8px");
+      expect(style.height).toBe("11px");
       expect(style.opacity).toBe(1);
-    });
-  });
-
-  describe("muted handle neon shadow", () => {
-    const computeNeonShadow = (
-      isNullHandle: boolean,
-      isMuted: boolean,
-      isActive: boolean,
-    ): string => {
-      if (isNullHandle || isMuted) return "none";
-      if (!isActive) return "ring";
-      return "glow";
-    };
-
-    it("should return none when muted", () => {
-      expect(computeNeonShadow(false, true, false)).toBe("none");
-      expect(computeNeonShadow(false, true, true)).toBe("none");
-    });
-
-    it("should return none when null handle", () => {
-      expect(computeNeonShadow(true, false, false)).toBe("none");
-    });
-
-    it("should return ring when not muted and not active", () => {
-      expect(computeNeonShadow(false, false, false)).toBe("ring");
-    });
-
-    it("should return glow when not muted and active", () => {
-      expect(computeNeonShadow(false, false, true)).toBe("glow");
     });
   });
 });

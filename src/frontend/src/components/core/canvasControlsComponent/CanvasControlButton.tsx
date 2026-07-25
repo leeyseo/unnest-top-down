@@ -25,7 +25,7 @@ export const CanvasControlButton = ({
   return (
     <ControlButton
       data-testid={testId}
-      className="group !h-8 !w-8 rounded !p-0"
+      className="group !h-8 !w-8 rounded-lg !p-0"
       onClick={onClick}
       disabled={disabled}
       title={testId?.replace(/_/g, " ")}
@@ -33,7 +33,7 @@ export const CanvasControlButton = ({
       <ShadTooltip content={tooltipText} side="right">
         <div
           className={cn(
-            "rounded p-2.5 text-muted-foreground group-hover:text-primary",
+            "rounded-lg p-2.5 text-muted-foreground group-hover:bg-primary/10 group-hover:text-primary",
             backgroundClasses,
           )}
         >

@@ -184,31 +184,29 @@ body:has([data-radix-popper-content-wrapper]) .react-flow__pane {
 }
 
 .react-flow__edge .react-flow__edge-path {
-  transition: color;
+  transition: stroke 150ms ease;
   stroke: var(--connection) !important;
-  transition-duration: 150ms;
-  stroke-width: 2px !important;
+  stroke-width: 1.5px !important;
 }
 .react-flow__connection path {
-  transition: color;
+  transition: stroke 150ms ease;
   stroke: var(--connection) !important;
-  transition-duration: 150ms;
-  stroke-width: 2px !important;
+  stroke-width: 1.5px !important;
 }
 
 .react-flow__edge.running .react-flow__edge-path {
-  stroke: hsl(var(--foreground)) !important;
+  stroke: hsl(var(--primary)) !important;
   stroke-width: 2px !important;
 }
 
 .react-flow__edge.not-running .react-flow__edge-path {
-  stroke: hsl(var(--foreground)) !important;
-  stroke-width: 1px !important;
+  stroke: var(--connection) !important;
+  stroke-width: 1.5px !important;
 }
 
 .react-flow__edge.ran .react-flow__edge-path {
-  stroke: hsl(var(--foreground)) !important;
-  stroke-width: 2px !important;
+  stroke: var(--connection) !important;
+  stroke-width: 1.5px !important;
 }
 
 .ag-react-container {
