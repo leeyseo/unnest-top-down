@@ -393,8 +393,10 @@ async def test_copy_profile_pictures_creates_directories():
     # The function should have been called during app startup (client fixture)
     # Verify the directories exist
     birds_dir = config_path / "profile_pictures" / "Birds"
+    space_dir = config_path / "profile_pictures" / "Space"
 
     assert birds_dir.exists(), "Birds directory should exist after copy_profile_pictures"
+    assert space_dir.exists(), "Space directory should exist after copy_profile_pictures"
 
 
 @pytest.mark.usefixtures("client")
@@ -405,11 +407,18 @@ async def test_copy_profile_pictures_copies_files():
     config_path = SyncPath(config_dir)
 
     birds_dir = config_path / "profile_pictures" / "Birds"
+    space_dir = config_path / "profile_pictures" / "Space"
 
-    # Check that files were copied
-    bird_files = list(birds_dir.glob("*.svg")) if birds_dir.exists() else []
+    from langflow.initial_setup import setup
 
-    assert len(bird_files) == 5, "Should copy the five bird profile pictures"
+    source_path = SyncPath(setup.__file__).parent / "profile_pictures"
+    bird_files = {file.name for file in birds_dir.iterdir()} if birds_dir.exists() else set()
+    space_files = {file.name for file in space_dir.iterdir()} if space_dir.exists() else set()
+    expected_birds = {file.name for file in (source_path / "Birds").iterdir()}
+    expected_space = {file.name for file in (source_path / "Space").iterdir()}
+
+    assert expected_birds <= bird_files, "Should copy all bundled bird profile pictures"
+    assert expected_space <= space_files, "Should copy all bundled nature profile pictures"
 
 
 @pytest.mark.usefixtures("client")
@@ -455,13 +464,17 @@ async def test_copy_profile_pictures_source_exists():
     assert await source_path.exists(), "Source profile_pictures directory should exist in package"
 
     birds_source = source_path / "Birds"
+    space_source = source_path / "Space"
 
     assert await birds_source.exists(), "Source Birds directory should exist"
+    assert await space_source.exists(), "Source Space directory should exist"
 
     # Count source files
-    bird_files = [f async for f in birds_source.glob("*.svg")]
+    bird_files = [f async for f in birds_source.iterdir() if await f.is_file()]
+    space_files = [f async for f in space_source.iterdir() if await f.is_file()]
 
-    assert len(bird_files) == 5, "Source should contain the five bird profile pictures"
+    assert len(bird_files) == 12, "Source should contain twelve bird profile pictures"
+    assert len(space_files) == 8, "Source should contain eight nature profile pictures"
 
 
 @pytest.mark.usefixtures("client")
@@ -478,8 +491,9 @@ async def test_profile_pictures_available_via_api(client: AsyncClient, logged_in
     assert len(files) > 0, "Should have profile pictures available via API"
 
     # Check for expected file format
-    assert all(f.startswith("Birds/") for f in files), "Only bird profile pictures should be built in"
+    assert {f.split("/", 1)[0] for f in files} == {"Birds", "Space"}
     assert "Birds/01-owl.svg" in files, "Default owl profile picture should be available"
+    assert "Space/03-mountain-sunrise.png" in files, "Nature profile pictures should be available"
 
 
 @pytest.mark.usefixtures("client")

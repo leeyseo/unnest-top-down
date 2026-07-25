@@ -27,7 +27,8 @@ from langflow.services.storage.service import StorageService
 
 router = APIRouter(tags=["Files"], prefix="/files")
 
-LEGACY_PROFILE_PICTURE_FOLDERS = {"People", "Space"}
+LEGACY_PROFILE_PICTURE_FOLDERS = {"People"}
+BUILT_IN_PROFILE_PICTURE_FOLDERS = {"Birds", "Space"}
 DEFAULT_PROFILE_PICTURE_FOLDER = "Birds"
 
 
@@ -203,6 +204,18 @@ async def download_profile_picture(
 
         extension = safe_file.split(".")[-1]
         config_dir = settings_service.settings.config_dir
+        from langflow.initial_setup import setup
+
+        package_base = os.path.realpath(str(Path(setup.__file__).parent / "profile_pictures"))
+        package_candidate = os.path.realpath(os.path.join(package_base, safe_folder, safe_file))  # noqa: PTH118
+        if package_candidate != package_base and not package_candidate.startswith(package_base + os.sep):
+            raise HTTPException(status_code=404, detail="Profile picture not found")
+        package_path = Path(package_candidate)
+
+        # Config directories survive upgrades. Only current bundled filenames
+        # are served from built-in folders so retired assets stay hidden.
+        if safe_folder in BUILT_IN_PROFILE_PICTURE_FOLDERS and not package_path.is_file():
+            raise HTTPException(status_code=404, detail=f"Profile picture {safe_folder}/{safe_file} not found")
 
         # SECURITY: use os.path.realpath + startswith — the sanitiser pattern
         # recognised by CodeQL's py/path-injection analysis. realpath canonicalises
@@ -217,14 +230,6 @@ async def download_profile_picture(
 
         # Fallback to package bundled profile pictures if not found in config_dir
         if not file_path.exists():
-            from langflow.initial_setup import setup
-
-            package_base = os.path.realpath(str(Path(setup.__file__).parent / "profile_pictures"))
-            package_candidate = os.path.realpath(os.path.join(package_base, safe_folder, safe_file))  # noqa: PTH118
-            if package_candidate != package_base and not package_candidate.startswith(package_base + os.sep):
-                raise HTTPException(status_code=404, detail="Profile picture not found")
-
-            package_path = Path(package_candidate)
             if package_path.exists():
                 file_path = package_path
             else:
@@ -256,6 +261,14 @@ async def list_profile_pictures(
 
         # Build list for all allowed folders (dynamic)
         allowed_folders = _get_allowed_profile_picture_folders(settings_service)
+        from langflow.initial_setup import setup
+
+        package_base = Path(setup.__file__).parent / "profile_pictures"
+        bundled_names = {
+            folder: {file.name for file in (package_base / folder).iterdir() if file.is_file()}
+            for folder in BUILT_IN_PROFILE_PICTURE_FOLDERS
+            if (package_base / folder).exists()
+        }
 
         results: list[str] = []
         cfg_base = config_path / "profile_pictures"
@@ -263,17 +276,18 @@ async def list_profile_pictures(
             for folder in sorted(allowed_folders):
                 p = cfg_base / folder
                 if p.exists():
-                    results += [f"{folder}/{f.name}" for f in p.iterdir() if f.is_file()]
+                    results += [
+                        f"{folder}/{f.name}"
+                        for f in sorted(p.iterdir())
+                        if f.is_file() and (folder not in bundled_names or f.name in bundled_names[folder])
+                    ]
 
         # Fallback to package if config_dir produced no results
         if not results:
-            from langflow.initial_setup import setup
-
-            package_base = Path(setup.__file__).parent / "profile_pictures"
             for folder in sorted(allowed_folders):
                 p = package_base / folder
                 if p.exists():
-                    results += [f"{folder}/{f.name}" for f in p.iterdir() if f.is_file()]
+                    results += [f"{folder}/{f.name}" for f in sorted(p.iterdir()) if f.is_file()]
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 

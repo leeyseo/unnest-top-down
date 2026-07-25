@@ -591,7 +591,9 @@ async def copy_profile_pictures() -> None:
 
     The directory structure is:
     profile_pictures/
-    └── Birds/
+    ├── Birds/
+    │   └── [profile images]
+    └── Space/
         └── [profile images]
     """
     # Get config directory from settings

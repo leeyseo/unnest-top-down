@@ -412,7 +412,7 @@ async def test_list_profile_pictures(setup_profile_pictures, files_client):  # n
     # Check that files are properly formatted as "Folder/filename"
     assert any(file.startswith("Birds/") for file in files), "Should have bird profile pictures"
     assert any(file.startswith("Custom/") for file in files), "Should preserve custom profile pictures"
-    assert not any(file.startswith(("People/", "Space/")) for file in files)
+    assert not any(file.startswith("People/") for file in files)
     assert "Birds/01-owl.svg" in files
 
 
@@ -499,10 +499,7 @@ async def test_profile_pictures_with_s3_storage(setup_profile_pictures, files_cl
 
 
 async def test_profile_pictures_different_file_types(setup_profile_pictures, files_client):  # noqa: ARG001
-    """Test that content-type headers are correct for SVG files.
-
-    The real profile pictures are all SVG files. This test verifies
-    that the content-type detection works correctly.
+    """Test that content-type headers are correct for SVG and PNG files.
 
     Args:
         files_client: HTTP client for making API requests
@@ -516,6 +513,10 @@ async def test_profile_pictures_different_file_types(setup_profile_pictures, fil
     response = await files_client.get("api/v1/files/profile_pictures/Custom/001-custom.svg")
     assert response.status_code == 200
     assert "image/svg+xml" in response.headers["content-type"]
+
+    response = await files_client.get("api/v1/files/profile_pictures/Space/03-mountain-sunrise.png")
+    assert response.status_code == 200
+    assert "image/png" in response.headers["content-type"]
 
 
 # ============================================================================
@@ -582,8 +583,9 @@ async def test_list_profile_pictures_fallback_to_package(empty_config_dir, files
 
     # Should have files from the package
     assert len(files) > 0, "Should have profile pictures from package fallback"
-    assert all(f.startswith("Birds/") for f in files)
+    assert {f.split("/", 1)[0] for f in files} == {"Birds", "Space"}
     assert "Birds/01-owl.svg" in files
+    assert "Space/03-mountain-sunrise.png" in files
 
 
 async def test_download_profile_picture_not_found_in_both_locations(empty_config_dir, files_client):  # noqa: ARG001
@@ -644,10 +646,10 @@ async def test_list_profile_pictures_config_dir_takes_precedence(setup_profile_p
     """
     config_path = setup_profile_pictures
 
-    # Ensure we have a file in config_dir
-    birds_dir = config_path / "profile_pictures" / "Birds"
-    birds_dir.mkdir(parents=True, exist_ok=True)
-    (birds_dir / "custom-test-file.svg").write_bytes(b"<svg></svg>")
+    # Ensure we have a custom file in config_dir
+    custom_dir = config_path / "profile_pictures" / "Custom"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    (custom_dir / "custom-test-file.svg").write_bytes(b"<svg></svg>")
 
     response = await files_client.get("api/v1/files/profile_pictures/list")
     assert response.status_code == 200
@@ -656,7 +658,7 @@ async def test_list_profile_pictures_config_dir_takes_precedence(setup_profile_p
     files = data["files"]
 
     # Should include our custom file from config_dir
-    assert "Birds/custom-test-file.svg" in files
+    assert "Custom/custom-test-file.svg" in files
 
 
 async def test_download_profile_picture_path_traversal_attempt(empty_config_dir, files_client):  # noqa: ARG001
@@ -699,7 +701,7 @@ async def test_list_profile_pictures_empty_response_format(empty_config_dir, fil
     for file_path in data["files"]:
         assert "/" in file_path, f"File path should contain '/': {file_path}"
         folder, filename = file_path.split("/", 1)
-        assert folder == "Birds", f"Invalid folder: {folder}"
+        assert folder in {"Birds", "Space"}, f"Invalid folder: {folder}"
         assert len(filename) > 0, "Filename should not be empty"
 
 
@@ -732,6 +734,9 @@ async def partial_config_dir(monkeypatch):
     people_dir = config_path / "profile_pictures" / "People"
     people_dir.mkdir(parents=True, exist_ok=True)
     (people_dir / "test-person.svg").write_bytes(b"<svg><circle/></svg>")
+    old_space_dir = config_path / "profile_pictures" / "Space"
+    old_space_dir.mkdir(parents=True, exist_ok=True)
+    (old_space_dir / "046-rocket.svg").write_bytes(b"<svg><circle/></svg>")
 
     # Override the config_dir setting BEFORE app initialization
     monkeypatch.setenv("LANGFLOW_CONFIG_DIR", str(config_path))
@@ -753,9 +758,13 @@ async def test_profile_pictures_fallback_with_partial_config_dir(partial_config_
     files = data["files"]
 
     assert "People/test-person.svg" not in files
+    assert "Space/046-rocket.svg" not in files
     assert "Birds/01-owl.svg" in files
+    assert "Space/03-mountain-sunrise.png" in files
     response = await files_client.get("api/v1/files/profile_pictures/People/test-person.svg")
     assert response.status_code == 400
+    response = await files_client.get("api/v1/files/profile_pictures/Space/046-rocket.svg")
+    assert response.status_code == 404
 
 
 # ============================================================================

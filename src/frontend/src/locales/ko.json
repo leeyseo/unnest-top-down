@@ -89,5 +89,6 @@
   "settings.nav.messages": "메시지",
   "settings.nav.modelProviders": "Model Providers",
   "settings.nav.shortcuts": "단축키",
-  "settings.profilePictureCategory.Birds": "새 캐릭터"
+  "settings.profilePictureCategory.Birds": "새 캐릭터",
+  "settings.profilePictureCategory.Space": "자연 풍경"
 }

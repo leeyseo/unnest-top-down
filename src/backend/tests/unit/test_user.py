@@ -418,7 +418,7 @@ async def test_profile_pictures_endpoint_returns_files(client: AsyncClient, logg
 
     # After the fix, profile pictures should be available
     assert len(files) > 0, "Profile pictures list should not be empty after app startup"
-    assert all(f.startswith("Birds/") for f in files), "Only bird profile pictures should be built in"
+    assert {f.split("/", 1)[0] for f in files} == {"Birds", "Space"}
 
 
 @pytest.mark.api_key_required
