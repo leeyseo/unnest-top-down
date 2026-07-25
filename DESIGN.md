@@ -4,16 +4,16 @@ name: Unnest
 description: AI workflow를 시각적으로 설계하고 실행하는 플랫폼
 colors:
   # Core UI palette
-  primary: "#000000"
+  primary: "#3F6212"
   primary-foreground: "#FFFFFF"
-  primary-hover: "#27272A"
+  primary-hover: "#365314"
   background: "#FFFFFF"
   foreground: "#000000"
   muted: "#F4F4F5"
   muted-foreground: "#71717A"
   border: "#E4E4E7"
   input: "#E4E4E7"
-  ring: "#000000"
+  ring: "#3F6212"
   card: "#FFFFFF"
   card-foreground: "#000000"
   popover: "#FFFFFF"
@@ -99,8 +99,8 @@ colors:
   note-lime: "#D9F99D"
 
   # Beta feature badge
-  beta-background: "#DBEAFE"
-  beta-foreground: "#2563EB"
+  beta-background: "#ECFCCB"
+  beta-foreground: "#3F6212"
 
   # Data type colors (node port type indicators -- light mode)
   # In light mode: base = saturated, foreground = light tint
@@ -510,17 +510,17 @@ components:
 
 Unnest is a platform for visually designing and running AI workflows by dragging, connecting, and configuring modular components on an infinite canvas. The design language is that of a professional developer tool -- clean, information-dense, and deliberately restrained. Color is earned, not decorative; every hue in the system carries semantic meaning.
 
-The aesthetic sits between a code editor and a node-based creative tool. The core UI is strictly monochromatic -- black primary on white, with a warm zinc-gray scale for layering. This neutral foundation lets the **data type color system** (14 distinct hues encoding connection compatibility) and **accent families** (emerald for success, indigo for selection, blue for product actions) communicate meaning without competing for attention. The result is an interface that feels focused and engineered: complexity emerges from the user's composition, not from the UI itself.
+The aesthetic sits between a code editor and a node-based creative tool. Neutral white and zinc surfaces provide the foundation, while **Nest Green** identifies primary actions and selected form controls. This restrained brand layer lets the **data type color system** (14 distinct hues encoding connection compatibility) and semantic accent families communicate meaning without competing for attention. The result is an interface that feels focused and engineered: complexity emerges from the user's composition, not from the UI itself.
 
 Light and dark themes are fully supported via class-based toggling (`.dark` on root). The dark theme uses a deep zinc-black (#18181B) as its foundation, not a tinted dark blue, keeping the neutral character consistent across both modes.
 
 ## Colors
 
-The palette is built in concentric layers: a monochromatic core, semantic accent families, status colors, and the domain-specific data type system.
+The palette is built in concentric layers: a neutral core, the Nest Green action color, semantic accent families, status colors, and the domain-specific data type system.
 
 ### Core Palette
 
-- **Primary (#000000):** Solid black for primary buttons, text, focus rings, and tooltips. Inverts to white (#FFFFFF) in dark mode. This is the only "strong" color in structural UI.
+- **Primary / Nest Green (#3F6212):** Primary buttons, checked controls, and focus rings in light mode, paired with white text. Dark mode uses luminous Unnest Lime (#BEF264) with deep green text (#1A2E05). Hover uses #365314 in light mode and #A3E635 in dark mode. Both pairs meet WCAG AA contrast.
 - **Background (#FFFFFF):** Pure white for cards, popovers, dialogs, and content areas. Dark mode uses #18181B (zinc-900).
 - **Muted (#F4F4F5):** Light zinc-gray for secondary surfaces -- canvas background, card fills, inactive states. Dark mode: #27272A.
 - **Muted Foreground (#71717A):** Medium gray for captions, descriptions, metadata, and secondary text.
@@ -533,7 +533,7 @@ Accents that serve as **background / foreground pairs** for badges, tags, and co
 
 - **Emerald** (#D1F9E4 / #047857): Success, completion, enabled states, "built" indicators. Hover: #A7F3D0.
 - **Indigo** (#E0E7FF / #4F46E5): Node selection, active filters, focus indicators. Also used for the indigo scale (high: #4338CA, medium: #6366F1, low: #E0E7FF).
-- **Blue** (#DBEAFE / #2563EB): Product actions, component icons, and branded highlights.
+- **Blue** (#DBEAFE / #2563EB): Informational surfaces, component icons, and supporting highlights.
 - **Amber** (#FCE68A / #B45309): Warnings, caution badges. The background is a pale yellow; the foreground is burnt orange.
 
 **Standalone accent references** (used for text color, icons, and links -- not as bg/fg pairs):
@@ -602,7 +602,7 @@ Both families are bundled with the frontend. The product must not depend on exte
 - The primary lockup is the supplied symbol on the left with a Pretendard Bold `Unnest` wordmark on the right.
 - Use the full lockup on authentication and welcome surfaces. Use the symbol alone in compact navigation, loading, and chat-avatar contexts.
 - Render the symbol black in light mode and white in dark mode. The favicon uses a black background with a white symbol.
-- Keep the structural palette monochromatic. Blue remains the interaction, selection, and link accent.
+- Keep surfaces neutral. Nest Green is reserved for primary actions and selected controls; blue remains the informational, selection, and link accent.
 - Korean is the default language for new users. Keep technical terms such as Flow, Component, API, MCP, and workflow in English when translation would reduce clarity.
 
 The type scale is compact. The application uses 11px (`xxs`) through 16px (`base`) for the vast majority of UI. Headlines rarely exceed 24px inside the workspace. Density is preferred over visual hierarchy through size alone -- hierarchy is communicated through weight, color, and spatial grouping.
@@ -661,7 +661,7 @@ Interactive feedback is communicated through micro-animations rather than shadow
 
 - **Button press:** `active:scale-[0.97]` -- a subtle inward squeeze.
 - **Hover:** Background color shift to accent or muted, never shadow addition.
-- **Focus ring:** 1px ring using the `ring` token (black in light, white in dark).
+- **Focus ring:** 1px ring using the `ring` token (Nest Green in light, Unnest Lime in dark).
 
 ## Shapes
 
@@ -681,7 +681,7 @@ Borders are thin. Standard weight is 1px. Occasional 1.5px or 1.75px for emphasi
 
 The button system uses 7 semantic variants:
 
-- **Default (primary):** Solid black background, white text. The highest-emphasis action on any screen. Hover darkens to #27272A.
+- **Default (primary):** Nest Green (#3F6212) with white text in light mode; Unnest Lime (#BEF264) with deep green text in dark mode. The highest-emphasis action on any screen.
 - **Secondary:** Muted background with border, dark text. For secondary actions alongside a primary button.
 - **Destructive:** Red background, white text. Reserved for delete, remove, and irreversible actions.
 - **Outline:** Transparent with border. For medium-emphasis actions. Hover fills with the input color.
@@ -745,7 +745,7 @@ Collapsible panel (19rem expanded, 4rem icon-only) with smooth 300ms width trans
 
 ## Do's and Don'ts
 
-- Do use the monochromatic core palette for all structural UI -- reserve color for semantic meaning
+- Do keep structural surfaces neutral and reserve Nest Green for primary actions and selected controls
 - Do maintain WCAG AA contrast ratios (4.5:1 for normal text, 3:1 for large text and interactive elements)
 - Do use Pretendard Variable for all application UI text; JetBrains Mono only for code and machine-readable content
 - Do keep data type colors visually distinct -- they encode connection compatibility and must be recognizable at small sizes (port dots, connection lines)

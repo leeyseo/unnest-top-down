@@ -60,8 +60,8 @@
     --popover-foreground: 0 0% 0%; /* hsl(0, 0%, 0%) */
     --border: 240 6% 90%; /* hsl(240, 6%, 90%) */
     --input: 240 6% 90%; /* hsl(240, 6%, 90%) */
-    --primary-foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
-    --primary: 0 0% 0%; /* hsl(0, 0%, 0%) */
+    --primary-foreground: 0 0% 100%; /* #FFFFFF */
+    --primary: 86.25 68.97% 22.75%; /* #3F6212 — Unnest Nest Green */
     --secondary: 0 0% 100%; /* hsl(0, 0%, 100%) */
     --secondary-foreground: 240 4% 16%; /* hsl(240, 4%, 16%) */
     --accent: 240 5% 96%; /* hsl(240, 5%, 96%) */
@@ -70,8 +70,8 @@
     --destructive-foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
     --accent-amber: 26 90% 37%; /* hsl(26, 90%, 37%) */
     --accent-amber-foreground: 26 90% 37%; /* hsl(26, 90%, 37%) */
-    --ring: 0 0% 0%; /* hsl(0, 0%, 0%) */
-    --primary-hover: 240 4% 16%; /* hsl(240, 4%, 16%) */
+    --ring: 86.25 68.97% 22.75%; /* #3F6212 */
+    --primary-hover: 87.62 61.17% 20.2%; /* #365314 */
     --secondary-hover: 240 6% 90%; /* hsl(240, 6%, 90%) */
     --placeholder-foreground: 240 5% 65%; /* hsl(240, 5%, 65%) */
     --canvas: 240 5% 96%; /* hsl(240, 5%, 96%) */
@@ -267,16 +267,16 @@
     --popover-foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
     --border: 240 5% 26%; /* hsl(240, 5%, 26%) */
     --input: 240 5% 34%; /* hsl(240, 5%, 34%) */
-    --primary-foreground: 0 0% 0%; /* hsl(0, 0%, 0%) */
-    --primary: 0 0% 100%; /* hsl(0, 0%, 100%) */
+    --primary-foreground: 89.27 80.39% 10%; /* #1A2E05 */
+    --primary: 81.97 84.52% 67.06%; /* #BEF264 — Unnest Lime */
     --secondary: 0 0% 0%; /* hsl(0, 0%, 0%) */
     --secondary-foreground: 240 6% 90%; /* hsl(240, 6%, 90%) */
     --accent: 240 4% 16%; /* hsl(240, 4%, 16%) */
     --accent-foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
     --destructive: 0 84% 60%; /* hsl(0, 84%, 60%) */
     --destructive-foreground: 0 0% 100%; /* hsl(0, 0%, 100%) */
-    --ring: 0 0% 100%; /* hsl(0, 0%, 100%) */
-    --primary-hover: 240 6% 90%; /* hsl(240, 6%, 90%) */
+    --ring: 81.97 84.52% 67.06%; /* #BEF264 */
+    --primary-hover: 82.71 77.97% 55.49%; /* #A3E635 */
     --secondary-hover: 240 4% 16%; /* hsl(240, 4%, 16%) */
     --placeholder-foreground: 240 4% 46%; /* hsl(240, 4%, 46%) */
     --canvas: 0 0% 0%; /* hsl(0, 0%, 0%) */

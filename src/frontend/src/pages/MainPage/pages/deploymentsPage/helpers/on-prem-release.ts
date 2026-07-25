@@ -96,7 +96,7 @@ export const defaultOnPremWizardValues: OnPremWizardValues = {
   solutionName: "Unnest",
   organizationName: "",
   logoUrl: "",
-  primaryColor: "#2563eb",
+  primaryColor: "#3f6212",
   loginNotice: "",
   showUnnestBranding: true,
   signing: true,
