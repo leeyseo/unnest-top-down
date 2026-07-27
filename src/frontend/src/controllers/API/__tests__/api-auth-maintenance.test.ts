@@ -1,4 +1,18 @@
-import { AUTH_MAINTENANCE_PATHS, isAuthMaintenanceURL } from "../api";
+import {
+  AUTH_MAINTENANCE_PATHS,
+  addCustomFetchHeaders,
+  isAuthMaintenanceURL,
+} from "../api";
+
+describe("addCustomFetchHeaders", () => {
+  it("handles fetch calls without a config argument", () => {
+    const config = addCustomFetchHeaders(undefined, {
+      "Accept-Language": "ko",
+    });
+
+    expect(new Headers(config.headers).get("Accept-Language")).toBe("ko");
+  });
+});
 
 describe("isAuthMaintenanceURL", () => {
   it("matches refresh, login, logout, and auto_login endpoints", () => {

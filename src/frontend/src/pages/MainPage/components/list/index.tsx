@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useParams } from "react-router-dom";
 import ForwardedIconComponent from "@/components/common/genericIconComponent";
+import UnnestLogo from "@/components/common/unnest-logo";
 import useDragStart from "@/components/core/cardComponent/hooks/use-on-drag-start";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -145,17 +146,25 @@ const ListComponent = ({
             <div
               className={cn(
                 `item-center flex justify-center rounded-lg p-1.5 transition-opacity duration-200`,
-                swatchColors[swatchIndex],
+                isComponent ? swatchColors[swatchIndex] : "bg-primary",
                 selected
                   ? "duration-300"
                   : "group-hover/checkbox:pointer-events-none group-hover/checkbox:opacity-0",
               )}
             >
-              <ForwardedIconComponent
-                name={flowData?.icon || icon}
-                aria-hidden="true"
-                className="flex h-5 w-5 items-center justify-center"
-              />
+              {isComponent ? (
+                <ForwardedIconComponent
+                  name={flowData?.icon || icon}
+                  aria-hidden="true"
+                  className="flex h-5 w-5 items-center justify-center"
+                />
+              ) : (
+                <UnnestLogo
+                  aria-hidden="true"
+                  className="h-5 w-5"
+                  markClassName="invert"
+                />
+              )}
             </div>
           </div>
 

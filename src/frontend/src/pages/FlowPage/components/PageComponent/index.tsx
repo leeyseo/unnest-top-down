@@ -21,6 +21,7 @@ import { useHotkeys } from "react-hotkeys-hook";
 import { useTranslation } from "react-i18next";
 import { useShallow } from "zustand/react/shallow";
 import ForwardedIconComponent from "@/components/common/genericIconComponent";
+import UnnestLogo from "@/components/common/unnest-logo";
 import { FlowBuilderWelcomeMount } from "@/components/core/flowBuilderWelcome/flow-builder-welcome-mount";
 import FlowToolbar from "@/components/core/flowToolbarComponent";
 import {
@@ -968,6 +969,12 @@ export default function Page({
             >
               <UpdateAllComponents />
               <MemoizedBackground />
+              <div
+                aria-hidden="true"
+                className="react-flow__container pointer-events-none z-0 flex items-center justify-center"
+              >
+                <UnnestLogo className="h-[clamp(16rem,38vw,32rem)] opacity-[0.045] dark:opacity-[0.07]" />
+              </div>
               {helperLineEnabled && <HelperLines helperLines={helperLines} />}
             </ReactFlow>
             <FlowBuildingComponent />

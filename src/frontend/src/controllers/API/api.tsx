@@ -52,6 +52,17 @@ export function isAuthMaintenanceURL(url: string | undefined): boolean {
   });
 }
 
+export function addCustomFetchHeaders(
+  config: RequestInit | undefined,
+  customHeaders: Record<string, string>,
+): RequestInit {
+  const headers = new Headers(config?.headers);
+  for (const [key, value] of Object.entries(customHeaders)) {
+    headers.set(key, value);
+  }
+  return { ...config, headers };
+}
+
 function ApiInterceptor() {
   const autoLogin = useAuthStore((state) => state.autoLogin);
   const setErrorData = useAlertStore((state) => state.setErrorData);
@@ -79,9 +90,7 @@ function ApiInterceptor() {
         // No need to manually add Authorization header from cookies
 
         if (!isExternalURL(url)) {
-          for (const [key, value] of Object.entries(customHeaders)) {
-            config.headers[key] = value;
-          }
+          config = addCustomFetchHeaders(config, customHeaders);
         }
 
         return [url, config];
