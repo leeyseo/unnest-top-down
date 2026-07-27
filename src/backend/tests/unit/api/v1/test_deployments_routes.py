@@ -131,3 +131,29 @@ def test_include_deployment_router_adds_routes_when_feature_enabled(monkeypatch:
     api_router_module.include_deployment_router(router_v1)
 
     assert any("/deployments" in route.path for route in _flatten_api_routes(router_v1))
+
+
+def test_watsonx_and_on_prem_routes_are_registered_independently(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(api_router_module.FEATURE_FLAGS, "wxo_deployments", False)
+    monkeypatch.setattr(api_router_module.FEATURE_FLAGS, "on_prem_export", True)
+
+    router_v1 = APIRouter(prefix="/v1")
+    api_router_module.include_deployment_router(router_v1)
+    api_router_module.include_on_prem_deployment_router(router_v1)
+    paths = [route.path for route in _flatten_api_routes(router_v1)]
+
+    assert any("/deployments/on-prem/" in path for path in paths)
+    assert not any(
+        "/deployments" in path and "/deployments/on-prem/" not in path
+        for path in paths
+    )
+
+    monkeypatch.setattr(api_router_module.FEATURE_FLAGS, "wxo_deployments", True)
+    monkeypatch.setattr(api_router_module.FEATURE_FLAGS, "on_prem_export", False)
+    router_v1 = APIRouter(prefix="/v1")
+    api_router_module.include_deployment_router(router_v1)
+    api_router_module.include_on_prem_deployment_router(router_v1)
+    paths = [route.path for route in _flatten_api_routes(router_v1)]
+
+    assert any("/deployments" in path for path in paths)
+    assert not any("/deployments/on-prem/" in path for path in paths)

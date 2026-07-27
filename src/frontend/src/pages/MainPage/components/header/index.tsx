@@ -12,6 +12,7 @@ import { useGetDownloadFlows } from "@/controllers/API/queries/flows/use-get-dow
 import { ENABLE_MCP } from "@/customization/feature-flags";
 import DeleteConfirmationModal from "@/modals/deleteConfirmationModal";
 import useAlertStore from "@/stores/alertStore";
+import useAuthStore from "@/stores/authStore";
 import useFlowsManagerStore from "@/stores/flowsManagerStore";
 import { useUtilityStore } from "@/stores/utilityStore";
 import { cn } from "@/utils/utils";
@@ -90,12 +91,32 @@ const HeaderComponent = ({
   const isDeploymentsEnabled = useUtilityStore(
     (s) => s.featureFlags.wxo_deployments === true,
   );
+  const isOnPremExportEnabled = useUtilityStore(
+    (s) => s.featureFlags.on_prem_export === true,
+  );
+  const isAdmin = useAuthStore((s) => s.isAdmin);
   const hideNewFlowButton = useUtilityStore((s) => s.hideNewFlowButton);
 
+  useEffect(() => {
+    if (
+      (flowType === "deployments" && !isDeploymentsEnabled) ||
+      (flowType === "on-prem-export" && (!isOnPremExportEnabled || !isAdmin))
+    ) {
+      setFlowType("flows");
+    }
+  }, [
+    flowType,
+    isAdmin,
+    isDeploymentsEnabled,
+    isOnPremExportEnabled,
+    setFlowType,
+  ]);
+
   // Determine which tabs to show based on feature flags
-  const tabTypes = [
-    ...(isDeploymentsEnabled ? ["deployments"] : []),
-    ...(isMCPEnabled ? ["mcp"] : ["components"]),
+  const tabTypes: FlowTabType[] = [
+    ...(isDeploymentsEnabled ? (["deployments"] as const) : []),
+    ...(isOnPremExportEnabled && isAdmin ? (["on-prem-export"] as const) : []),
+    ...(isMCPEnabled ? (["mcp"] as const) : (["components"] as const)),
     "flows",
   ];
 
@@ -173,10 +194,10 @@ const HeaderComponent = ({
                       ? t("mainPage.tabFlows")
                       : type === "deployments"
                         ? t("mainPage.tabDeployments")
-                        : type === "components"
-                          ? t("mainPage.tabComponents")
-                          : type.charAt(0).toUpperCase() + type.slice(1)}
-                  {type === "deployments" && (
+                        : type === "on-prem-export"
+                          ? "On-prem Export"
+                          : t("mainPage.tabComponents")}
+                  {(type === "deployments" || type === "on-prem-export") && (
                     <Badge
                       variant="beta"
                       size="xq"
@@ -190,7 +211,7 @@ const HeaderComponent = ({
             ))}
           </div>
           {/* Search and filters */}
-          {flowType !== "mcp" && flowType !== "deployments" && (
+          {!["mcp", "deployments", "on-prem-export"].includes(flowType) && (
             <div className="flex justify-between">
               <div className="flex w-full xl:w-5/12">
                 <Input

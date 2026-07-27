@@ -18,6 +18,7 @@ import {
   useValidateOnPremRelease,
 } from "@/controllers/API/queries/on-prem-deployments/use-on-prem-release";
 import { useFolderStore } from "@/stores/foldersStore";
+import { useUtilityStore } from "@/stores/utilityStore";
 import type { FlowType, PaginatedFlowsType } from "@/types/flow";
 import { cn } from "@/utils/utils";
 import {
@@ -57,6 +58,9 @@ export default function OnPremExportModal({
   const [jsonError, setJsonError] = useState("");
   const [registryReference, setRegistryReference] = useState("");
   const [registrySecretName, setRegistrySecretName] = useState("");
+  const buildsEnabled = useUtilityStore(
+    (state) => state.featureFlags.on_prem_builds === true,
+  );
   const showError = useErrorAlert();
 
   const flowsQuery = useGetRefreshFlowsQuery(
@@ -256,22 +260,35 @@ export default function OnPremExportModal({
         </div>
 
         <DialogFooter className="border-t pt-4">
-          <OnPremExportFooter
-            step={step}
-            exported={!!exportRelease.data}
-            canContinue={canContinue}
-            validated={validated}
-            validating={validation.isPending}
-            exporting={exportRelease.isPending}
-            onBack={() => (step === 0 ? resetAndClose() : setStep(step - 1))}
-            onNext={() => {
-              if (step === 0 && !payload()) return;
-              setStep(step + 1);
-            }}
-            onValidate={validate}
-            onSubmit={submit}
-            onDone={resetAndClose}
-          />
+          <div className="flex w-full items-center justify-between gap-4">
+            {!buildsEnabled && (
+              <p className="text-sm text-muted-foreground" role="status">
+                Build server is not configured. Validation is available, but
+                release builds are disabled.
+              </p>
+            )}
+            <div className="ml-auto flex gap-2">
+              <OnPremExportFooter
+                step={step}
+                exported={!!exportRelease.data}
+                canContinue={canContinue}
+                validated={validated}
+                buildsEnabled={buildsEnabled}
+                validating={validation.isPending}
+                exporting={exportRelease.isPending}
+                onBack={() =>
+                  step === 0 ? resetAndClose() : setStep(step - 1)
+                }
+                onNext={() => {
+                  if (step === 0 && !payload()) return;
+                  setStep(step + 1);
+                }}
+                onValidate={validate}
+                onSubmit={submit}
+                onDone={resetAndClose}
+              />
+            </div>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

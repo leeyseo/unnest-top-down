@@ -23,6 +23,7 @@ import useFileDrop from "../../hooks/use-on-file-drop";
 import type { FlowTabType } from "../../types";
 import DeploymentsPage from "../deploymentsPage/deployments-page";
 import EmptyFolder from "../emptyFolder";
+import OnPremExportPage from "../onPremExportPage/on-prem-export-page";
 import { isFolderEmpty } from "./utils/isFolderEmpty";
 
 const HomePage = ({ type }: { type: "flows" | "components" | "mcp" }) => {
@@ -41,8 +42,10 @@ const HomePage = ({ type }: { type: "flows" | "components" | "mcp" }) => {
   const navigate = useCustomNavigate();
 
   const [flowType, setFlowType] = useState<FlowTabType>(
-    (location.state as Record<string, unknown>)?.flowType === "deployments"
-      ? "deployments"
+    ["deployments", "on-prem-export"].includes(
+      (location.state as Record<string, unknown>)?.flowType as string,
+    )
+      ? ((location.state as Record<string, unknown>).flowType as FlowTabType)
       : type,
   );
   const myCollectionId = useFolderStore((state) => state.myCollectionId);
@@ -319,6 +322,8 @@ const HomePage = ({ type }: { type: "flows" | "components" | "mcp" }) => {
                     <CustomMcpServerTab folderName={folderName} />
                   ) : flowType === "deployments" ? (
                     <DeploymentsPage />
+                  ) : flowType === "on-prem-export" ? (
+                    <OnPremExportPage />
                   ) : (flowType === "flows" || flowType === "components") &&
                     data &&
                     data.pagination.total > 0 ? (

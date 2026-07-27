@@ -177,17 +177,42 @@ async def test_validation_rejects_direct_message_store_when_conversation_storage
     assert any("direct conversation storage components (direct-store)" in error for error in response.json()["errors"])
 
 
-async def test_registry_push_requires_superuser(client: AsyncClient, logged_in_headers):
-    response = await client.post(
-        f"/api/v1/deployments/on-prem/releases/{uuid4()}/builds/{uuid4()}/registry",
-        headers=logged_in_headers,
-        json={
-            "reference": "registry.internal/agency/unnest:1.0.0",
-            "credential_secret_name": "REGISTRY_CREDENTIAL",
-        },
-    )
+async def test_on_prem_routes_require_superuser(client: AsyncClient, logged_in_headers):
+    requests = [
+        ("GET", "/api/v1/deployments/on-prem/releases", None),
+        (
+            "POST",
+            "/api/v1/deployments/on-prem/releases/validate",
+            _release_payload(str(uuid4()), str(uuid4())),
+        ),
+        ("POST", "/api/v1/deployments/on-prem/releases", _release_payload(str(uuid4()), str(uuid4()))),
+        ("GET", f"/api/v1/deployments/on-prem/releases/{uuid4()}", None),
+        ("GET", f"/api/v1/deployments/on-prem/releases/{uuid4()}/builds", None),
+        ("POST", f"/api/v1/deployments/on-prem/releases/{uuid4()}/builds/{uuid4()}/submit", None),
+        ("POST", f"/api/v1/deployments/on-prem/releases/{uuid4()}/builds/{uuid4()}/sync", None),
+        (
+            "PATCH",
+            f"/api/v1/deployments/on-prem/releases/{uuid4()}/builds/{uuid4()}/critical-override",
+            {"reason": "not allowed"},
+        ),
+        (
+            "POST",
+            f"/api/v1/deployments/on-prem/releases/{uuid4()}/builds/{uuid4()}/registry",
+            {
+                "reference": "registry.internal/agency/unnest:1.0.0",
+                "credential_secret_name": "REGISTRY_CREDENTIAL",
+            },
+        ),
+        (
+            "GET",
+            f"/api/v1/deployments/on-prem/releases/{uuid4()}/builds/{uuid4()}/artifacts/{uuid4()}/download",
+            None,
+        ),
+    ]
 
-    assert response.status_code == status.HTTP_403_FORBIDDEN
+    for method, path, body in requests:
+        response = await client.request(method, path, headers=logged_in_headers, json=body)
+        assert response.status_code == status.HTTP_403_FORBIDDEN
 
 
 async def test_create_on_prem_release_from_saved_versions(
@@ -412,7 +437,10 @@ async def test_create_on_prem_release_from_saved_versions(
     assert duplicate.status_code == status.HTTP_409_CONFLICT
 
 
-async def test_validate_on_prem_release_rejects_plaintext_flow_secret(client: AsyncClient, logged_in_headers):
+async def test_validate_on_prem_release_rejects_plaintext_flow_secret(
+    client: AsyncClient, logged_in_headers_super_user
+):
+    logged_in_headers = logged_in_headers_super_user
     agent_version_id, ingestion_version_id = await _root_versions(client, logged_in_headers)
     secret_node = _node("model", "LanguageModel")
     secret_node["data"]["node"]["template"]["api_key"] = {
@@ -451,8 +479,9 @@ async def test_validate_on_prem_release_rejects_plaintext_flow_secret(client: As
 
 async def test_validate_on_prem_release_requires_api_component_mappings(
     client: AsyncClient,
-    logged_in_headers,
+    logged_in_headers_super_user,
 ):
+    logged_in_headers = logged_in_headers_super_user
     agent_version_id, ingestion_version_id = await _root_versions(client, logged_in_headers)
     payload = _release_payload(agent_version_id, ingestion_version_id)
     payload["api"]["input_mapping"] = {}
@@ -470,8 +499,9 @@ async def test_validate_on_prem_release_requires_api_component_mappings(
 
 async def test_validate_on_prem_release_routes_risky_flow_to_declared_sandbox_network(
     client: AsyncClient,
-    logged_in_headers,
+    logged_in_headers_super_user,
 ):
+    logged_in_headers = logged_in_headers_super_user
     risky = _node("repl", "PythonREPL")
     risky["data"]["node"]["metadata"] = {
         "deployment": {
@@ -521,8 +551,9 @@ async def test_validate_on_prem_release_routes_risky_flow_to_declared_sandbox_ne
 
 async def test_validate_on_prem_release_rejects_unlocked_custom_dependency(
     client: AsyncClient,
-    logged_in_headers,
+    logged_in_headers_super_user,
 ):
+    logged_in_headers = logged_in_headers_super_user
     risky = _node("custom", "CustomComponent")
     risky["data"]["node"]["metadata"] = {
         "deployment": {

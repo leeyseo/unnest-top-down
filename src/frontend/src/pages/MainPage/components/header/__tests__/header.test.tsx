@@ -1,4 +1,5 @@
 import { act, render, screen } from "@testing-library/react";
+import useAuthStore from "@/stores/authStore";
 import { useUtilityStore } from "@/stores/utilityStore";
 import HeaderComponent from "../index";
 
@@ -176,12 +177,14 @@ describe("HeaderComponent - TabIndex Behavior with Bulk Actions", () => {
     jest.clearAllMocks();
     act(() => {
       useUtilityStore.setState({ featureFlags: {} });
+      useAuthStore.setState({ isAdmin: false });
     });
   });
 
   afterEach(() => {
     act(() => {
       useUtilityStore.setState({ featureFlags: {} });
+      useAuthStore.setState({ isAdmin: false });
     });
   });
 
@@ -255,6 +258,43 @@ describe("HeaderComponent - TabIndex Behavior with Bulk Actions", () => {
       render(<HeaderComponent {...defaultProps} selectedFlows={[]} />);
 
       expect(screen.queryByTestId("new-project-btn")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("deployment tabs", () => {
+    it("shows On-prem Export only to admins", () => {
+      act(() => {
+        useUtilityStore.setState({
+          featureFlags: { on_prem_export: true },
+        });
+      });
+      const { rerender } = render(<HeaderComponent {...defaultProps} />);
+
+      expect(
+        screen.queryByTestId("on-prem-export-btn"),
+      ).not.toBeInTheDocument();
+
+      act(() => useAuthStore.setState({ isAdmin: true }));
+      rerender(<HeaderComponent {...defaultProps} />);
+
+      expect(screen.getByTestId("on-prem-export-btn")).toBeInTheDocument();
+    });
+
+    it("keeps Watsonx and On-prem Export flags independent", () => {
+      act(() => {
+        useAuthStore.setState({ isAdmin: true });
+        useUtilityStore.setState({
+          featureFlags: {
+            wxo_deployments: false,
+            on_prem_export: true,
+          },
+        });
+      });
+
+      render(<HeaderComponent {...defaultProps} />);
+
+      expect(screen.queryByTestId("deployments-btn")).not.toBeInTheDocument();
+      expect(screen.getByTestId("on-prem-export-btn")).toBeInTheDocument();
     });
   });
 });

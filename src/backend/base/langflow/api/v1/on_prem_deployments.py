@@ -28,6 +28,7 @@ from langflow.api.v1.schemas.on_prem_deployments import (
     OnPremReleaseValidationResponse,
     RegistryPushRequest,
 )
+from langflow.services.auth.utils import get_current_active_superuser
 from langflow.services.database.models.auth import AuthzAuditLog
 from langflow.services.database.models.deployment_release import (
     DeploymentAcceptanceTest,
@@ -51,7 +52,11 @@ from langflow.services.deployment.source_documents import (
 from langflow.services.deps import get_storage_service
 from langflow.services.storage.service import StorageService
 
-router = APIRouter(prefix="/deployments/on-prem/releases", tags=["On-premise Deployments"])
+router = APIRouter(
+    prefix="/deployments/on-prem/releases",
+    tags=["On-premise Deployments"],
+    dependencies=[Depends(get_current_active_superuser)],
+)
 MAX_OFFLINE_PACKAGE_SIZE = 50 * 1024**3
 
 

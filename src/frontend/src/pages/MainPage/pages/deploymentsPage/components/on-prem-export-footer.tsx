@@ -5,6 +5,7 @@ export function OnPremExportFooter({
   exported,
   canContinue,
   validated,
+  buildsEnabled,
   validating,
   exporting,
   onBack,
@@ -17,6 +18,7 @@ export function OnPremExportFooter({
   exported: boolean;
   canContinue: boolean;
   validated: boolean;
+  buildsEnabled: boolean;
   validating: boolean;
   exporting: boolean;
   onBack: () => void;
@@ -49,7 +51,11 @@ export function OnPremExportFooter({
           >
             {validating ? "Validating…" : "Validate"}
           </Button>
-          <Button onClick={onSubmit} disabled={!validated || exporting}>
+          <Button
+            onClick={onSubmit}
+            disabled={!buildsEnabled || !validated || exporting}
+            data-testid="create-on-prem-build"
+          >
             {exporting ? "Starting build…" : "Create release & build"}
           </Button>
         </>

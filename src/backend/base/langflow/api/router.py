@@ -26,7 +26,6 @@ from langflow.api.v1 import (
     model_options_router,
     models_router,
     monitor_router,
-    on_prem_deployments_router,
     openai_responses_router,
     projects_router,
     starter_projects_router,
@@ -58,6 +57,14 @@ def include_deployment_router(target_router: APIRouter) -> None:
         target_router.include_router(deployment_router)
 
 
+def include_on_prem_deployment_router(target_router: APIRouter) -> None:
+    """Mount on-prem export routes independently from Watsonx deployments."""
+    if FEATURE_FLAGS.on_prem_export:
+        from langflow.api.v1.on_prem_deployments import router as on_prem_deployments_router
+
+        target_router.include_router(on_prem_deployments_router)
+
+
 router_v1.include_router(chat_router)
 router_v1.include_router(endpoints_router)
 router_v1.include_router(validate_router)
@@ -80,7 +87,6 @@ router_v1.include_router(mcp_router)
 router_v1.include_router(voice_mode_router)
 router_v1.include_router(mcp_projects_router)
 router_v1.include_router(openai_responses_router)
-router_v1.include_router(on_prem_deployments_router)
 router_v1.include_router(models_router)
 router_v1.include_router(model_options_router)
 router_v1.include_router(authz_shares_router)
@@ -105,6 +111,7 @@ router_v1.include_router(authz_me_router)
 # because it executes per-request, after settings have been built.
 router_v1.include_router(extensions_router)
 include_deployment_router(router_v1)
+include_on_prem_deployment_router(router_v1)
 
 
 # Agentic flow execution - lazy import to avoid circular dependency
