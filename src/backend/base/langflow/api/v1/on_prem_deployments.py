@@ -539,6 +539,8 @@ async def push_build_to_registry(
     session: DbSession,
     current_user: CurrentActiveUser,
 ) -> DeploymentArtifactRead:
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin access required")
     release, build = await _owned_build(
         session,
         release_id=release_id,

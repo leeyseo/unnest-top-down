@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from fastapi import status
 from langflow.services.deployment import WorkerArtifact, WorkerBuildStatus, next_api_version
@@ -174,6 +175,19 @@ async def test_validation_rejects_direct_message_store_when_conversation_storage
 
     assert response.status_code == status.HTTP_200_OK
     assert any("direct conversation storage components (direct-store)" in error for error in response.json()["errors"])
+
+
+async def test_registry_push_requires_superuser(client: AsyncClient, logged_in_headers):
+    response = await client.post(
+        f"/api/v1/deployments/on-prem/releases/{uuid4()}/builds/{uuid4()}/registry",
+        headers=logged_in_headers,
+        json={
+            "reference": "registry.internal/agency/unnest:1.0.0",
+            "credential_secret_name": "REGISTRY_CREDENTIAL",
+        },
+    )
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
 
 
 async def test_create_on_prem_release_from_saved_versions(

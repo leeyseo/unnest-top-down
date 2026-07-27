@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -398,6 +399,17 @@ class RegistryPushRequest(BaseModel):
         return self
 
 
+def _registry_repository(reference: str) -> str:
+    without_digest = reference.partition("@")[0]
+    last_slash = without_digest.rfind("/")
+    last_colon = without_digest.rfind(":")
+    return without_digest[:last_colon] if last_colon > last_slash else without_digest
+
+
+class BuildCapacityError(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class BuildWorkerConfig:
     root: Path
@@ -416,6 +428,7 @@ class BuildWorkerConfig:
     wheelhouse: Path | None = None
     registry_credentials: Path | None = None
     forbidden_licenses: frozenset[str] = frozenset()
+    max_concurrent_builds: int = 2
 
     @classmethod
     def from_env(cls) -> BuildWorkerConfig:
@@ -464,6 +477,7 @@ class BuildWorkerConfig:
                 for item in os.getenv("UNNEST_FORBIDDEN_LICENSES", "").split(",")
                 if item.strip()
             ),
+            max_concurrent_builds=int(os.getenv("UNNEST_MAX_CONCURRENT_BUILDS", "2")),
         )
         config.validate()
         return config
@@ -499,6 +513,14 @@ class BuildWorkerConfig:
         if self.wheelhouse is not None and (not self.wheelhouse.is_dir() or self.wheelhouse.is_symlink()):
             msg = f"Offline wheelhouse is invalid: {self.wheelhouse}"
             raise ValueError(msg)
+        if self.registry_credentials is not None and (
+            not self.registry_credentials.is_dir() or self.registry_credentials.is_symlink()
+        ):
+            msg = f"Registry credential directory is invalid: {self.registry_credentials}"
+            raise ValueError(msg)
+        if self.max_concurrent_builds < 1:
+            msg = "UNNEST_MAX_CONCURRENT_BUILDS must be positive"
+            raise ValueError(msg)
         for name in ("postgresql.tar", "redis.tar"):
             image = self.support_images / name
             if not image.is_file() or image.is_symlink():
@@ -511,6 +533,10 @@ class DockerImageBuildWorker:
         config.validate()
         self.config = config
         self.config.root.mkdir(parents=True, exist_ok=True)
+        self._build_lock = threading.Lock()
+        # ponytail: process-local cap; use an external queue before running multiple worker processes.
+        self._active_builds: set[str] = set()
+        self._running_builds: set[str] = set()
 
     def _job(self, job_id: str) -> Path:
         try:
@@ -544,21 +570,28 @@ class DockerImageBuildWorker:
 
     def submit(self, request: BuildRequest, source_documents: Path | None = None) -> WorkerBuildStatus:
         job = self._job(str(request.build_id))
-        if (job / "status.json").is_file():
-            current = self._status(str(request.build_id))
-            if current.status in {"queued", "running", "succeeded"}:
-                return current
-            shutil.rmtree(job)
-        job.mkdir(parents=True)
-        try:
-            stage_source_documents(source_documents, job / "source-bundle", request.manifest)
-            self._write_json(job / "request.json", request.model_dump(mode="json"))
-            queued = WorkerBuildStatus(job_id=str(request.build_id), status="queued")
-            self._write_json(job / "status.json", queued.model_dump(mode="json"))
-        except Exception:
-            shutil.rmtree(job)
-            raise
-        return queued
+        job_id = str(request.build_id)
+        with self._build_lock:
+            if (job / "status.json").is_file():
+                current = self._status(job_id)
+                if current.status in {"queued", "running", "succeeded"}:
+                    return current
+                shutil.rmtree(job)
+            if len(self._active_builds) >= self.config.max_concurrent_builds:
+                msg = "Build worker is at capacity"
+                raise BuildCapacityError(msg)
+            self._active_builds.add(job_id)
+            job.mkdir(parents=True)
+            try:
+                stage_source_documents(source_documents, job / "source-bundle", request.manifest)
+                self._write_json(job / "request.json", request.model_dump(mode="json"))
+                queued = WorkerBuildStatus(job_id=job_id, status="queued")
+                self._write_json(job / "status.json", queued.model_dump(mode="json"))
+            except Exception:
+                self._active_builds.remove(job_id)
+                shutil.rmtree(job)
+                raise
+            return queued
 
     def _run(self, command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> str:
         completed = subprocess.run(  # noqa: S603
@@ -783,11 +816,15 @@ class DockerImageBuildWorker:
         return archive, signature
 
     def run(self, job_id: str) -> None:
+        with self._build_lock:
+            if job_id not in self._active_builds or job_id in self._running_builds:
+                return
+            self._running_builds.add(job_id)
         job = self._job(job_id)
         logs: list[str] = []
-        running = WorkerBuildStatus(job_id=job_id, status="running")
-        self._write_json(job / "status.json", running.model_dump(mode="json"))
         try:
+            running = WorkerBuildStatus(job_id=job_id, status="running")
+            self._write_json(job / "status.json", running.model_dump(mode="json"))
             request = BuildRequest.model_validate_json((job / "request.json").read_text(encoding="utf-8"))
             signer_fingerprint = public_key_fingerprint(self.config.cosign_public_key.read_bytes())
             request.manifest["build"]["signer_fingerprint"] = signer_fingerprint
@@ -918,6 +955,10 @@ class DockerImageBuildWorker:
         except Exception as exc:  # noqa: BLE001 - persist the failure for polling clients
             failed = WorkerBuildStatus(job_id=job_id, status="failed", logs=str(exc))
             self._write_json(job / "status.json", failed.model_dump(mode="json"))
+        finally:
+            with self._build_lock:
+                self._running_builds.discard(job_id)
+                self._active_builds.discard(job_id)
 
     def artifact(self, job_id: str) -> Path:
         worker_status = self._status(job_id)
@@ -946,6 +987,18 @@ class DockerImageBuildWorker:
         authfile = credential_dir / "config.json"
         if not authfile.is_file() or authfile.is_symlink():
             msg = "Registry credential is unavailable"
+            raise RuntimeError(msg)
+        repositories_file = credential_dir / "repositories.txt"
+        if not repositories_file.is_file() or repositories_file.is_symlink():
+            msg = "Registry credential repository allowlist is unavailable"
+            raise RuntimeError(msg)
+        repositories = {
+            line.strip()
+            for line in repositories_file.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        if _registry_repository(request.reference) not in repositories:
+            msg = "Registry repository is not allowed for this credential"
             raise RuntimeError(msg)
         job = self._job(job_id)
         digest_file = job / "registry.digest"
@@ -1056,6 +1109,8 @@ def create_build_worker_app(worker: DockerImageBuildWorker | None = None) -> Fas
                 request = BuildRequest.model_validate(await http_request.json())
                 source_documents = None
             result = build_worker.submit(request, source_documents)
+        except BuildCapacityError as exc:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
         except (OSError, SourceDocumentError, ValidationError, ValueError) as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
         finally:

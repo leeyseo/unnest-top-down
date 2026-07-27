@@ -4,8 +4,10 @@ import base64
 import hashlib
 import json
 import tarfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from uuid import uuid4
 
 import httpx
@@ -15,9 +17,11 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from langflow.api.v1.schemas.on_prem_deployments import OnPremDeploymentConfig
 from langflow.services.deployment.build_worker import (
+    BuildCapacityError,
     BuildRequest,
     BuildWorkerConfig,
     DockerImageBuildWorker,
+    RegistryPushRequest,
     create_build_worker_app,
 )
 from langflow.services.deployment.buildkit import BuildKitWorkerClient, WorkerBuildStatus
@@ -52,6 +56,55 @@ def test_build_request_accepts_release_requiring_whole_flow_sandbox():
     }
 
     assert BuildRequest.model_validate(request).manifest["sandbox"]["required"] is True
+
+
+def test_worker_limits_active_builds(tmp_path):
+    worker = object.__new__(DockerImageBuildWorker)
+    worker.config = SimpleNamespace(root=tmp_path, max_concurrent_builds=1)
+    worker._build_lock = threading.Lock()
+    worker._active_builds = set()
+    worker._running_builds = set()
+    worker.submit(_request(uuid4(), f"sha256:{'a' * 64}"))
+
+    with pytest.raises(BuildCapacityError, match="at capacity"):
+        worker.submit(_request(uuid4(), f"sha256:{'a' * 64}"))
+
+
+def test_registry_push_rejects_repository_outside_credential_allowlist(tmp_path, monkeypatch):
+    credentials = tmp_path / "credentials"
+    credential = credentials / "PRODUCTION"
+    credential.mkdir(parents=True)
+    (credential / "config.json").write_text("{}", encoding="utf-8")
+    (credential / "repositories.txt").write_text("registry.internal/approved/unnest\n", encoding="utf-8")
+    worker = object.__new__(DockerImageBuildWorker)
+    worker.config = SimpleNamespace(registry_credentials=credentials)
+    monkeypatch.setattr(
+        worker,
+        "_status",
+        lambda _job_id: WorkerBuildStatus(
+            job_id=str(uuid4()),
+            status="succeeded",
+            scan_report={"critical": 0},
+            artifacts=[
+                {
+                    "artifact_type": "package",
+                    "location": "release.tar",
+                    "digest": f"sha256:{'a' * 64}",
+                    "checksums": {"release.tar": f"sha256:{'a' * 64}"},
+                    "sbom": {"bomFormat": "CycloneDX"},
+                }
+            ],
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="not allowed"):
+        worker.push_registry(
+            str(uuid4()),
+            RegistryPushRequest(
+                reference="registry.internal/unapproved/unnest:1.0.0",
+                credential_secret_name="PRODUCTION",  # noqa: S106
+            ),
+        )
 
 
 async def test_mtls_client_and_worker_transfer_source_documents_as_multipart(tmp_path):
