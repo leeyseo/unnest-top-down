@@ -246,7 +246,7 @@ jobs:
           docker buildx prune -af || true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to Docker Hub
         if: ${{ inputs.push_to_registry }}
@@ -319,7 +319,7 @@ jobs:
           docker buildx prune -af || true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to Docker Hub
         if: ${{ inputs.push_to_registry }}
@@ -392,7 +392,7 @@ jobs:
           docker buildx prune -af || true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to Docker Hub
         if: ${{ inputs.push_to_registry }}
@@ -469,7 +469,7 @@ jobs:
           docker buildx prune -af || true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to Docker Hub
         if: ${{ inputs.push_to_registry }}
@@ -542,7 +542,7 @@ jobs:
           docker buildx prune -af || true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to Docker Hub
         if: ${{ inputs.push_to_registry }}
@@ -615,7 +615,7 @@ jobs:
           docker buildx prune -af || true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to Docker Hub
         if: ${{ inputs.push_to_registry }}
