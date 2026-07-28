@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10,<3.15"
 license = { text = "MIT" }
 authors = [
-    { name = "Langflow", email = "contact@langflow.org" },
+    { name = "Unnest", email = "leeyoonseo@unnest.co.kr" },
 ]
 keywords = ["langflow", "lfx", "extension", "bundle", "ibm", "db2", "watsonx", "vector-store"]
 

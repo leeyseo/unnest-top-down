@@ -5,7 +5,7 @@ description = "Stepflow execution backend for Langflow"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 authors = [
-    {name = "Langflow Contributors"}
+    {name = "Unnest", email = "leeyoonseo@unnest.co.kr"}
 ]
 requires-python = ">=3.10,<3.15"
 keywords = [

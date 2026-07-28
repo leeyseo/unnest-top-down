@@ -4,7 +4,7 @@ version = "1.10.2"
 description = "Langflow Executor - A lightweight CLI tool for executing and serving Langflow AI flows"
 readme = "README.md"
 authors = [
-    { name = "Gabriel Luiz Freitas Almeida", email = "gabriel@langflow.org" }
+    { name = "Unnest", email = "leeyoonseo@unnest.co.kr" }
 ]
 requires-python = ">=3.10,<3.15"
 dependencies = [
