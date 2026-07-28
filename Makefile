@@ -1,4 +1,4 @@
-.PHONY: all init format_backend format lint build run_backend dev help tests coverage clean_python_cache clean_npm_cache clean_frontend_build clean_all run_clic load_test_setup load_test_setup_basic load_test_list_flows load_test_run load_test_langflow_quick load_test_stress load_test_example load_test_clean load_test_remote_setup load_test_remote_run load_test_help docs docs_build docs_install api_examples_local api_examples_local_syntax
+.PHONY: all init format_backend format lint build run_backend dev help tests coverage clean_python_cache clean_npm_cache clean_frontend_build clean_all run_clic load_test_setup load_test_setup_basic load_test_list_flows load_test_run load_test_langflow_quick load_test_stress load_test_example load_test_clean load_test_remote_setup load_test_remote_run load_test_help
 
 # Configurations
 VERSION=$(shell grep "^version" pyproject.toml | sed 's/.*\"\(.*\)\"$$/\1/')
@@ -54,7 +54,6 @@ help: ## show basic help message with common commands
 	@echo "  $(GREEN)make format$(NC)              - Format all code (backend + frontend)"
 	@echo "  $(GREEN)make tests$(NC)               - Run all tests"
 	@echo "  $(GREEN)make build$(NC)               - Build the project"
-	@echo "  $(GREEN)make docs$(NC)                - Start documentation server (http://localhost:3030)"
 	@echo "  $(GREEN)make clean_all$(NC)           - Clean all caches and build artifacts"
 	@echo ''
 	@echo "$(GREEN)Specialized Help Commands:$(NC)"
@@ -1057,41 +1056,6 @@ help_advanced: ## show advanced and miscellaneous commands
 	@echo ''
 	@echo "$(GREEN)═══════════════════════════════════════════════════════════════════$(NC)"
 	@echo ''
-
-######################
-# DOCUMENTATION
-######################
-
-docs_port ?= 3030
-
-docs_install: ## install documentation dependencies
-	@echo "$(GREEN)Installing documentation dependencies...$(NC)"
-	@cd docs && npm install
-
-docs: docs_install ## start documentation development server (default port 3030)
-	@echo "$(GREEN)Starting documentation server at http://localhost:$(docs_port)$(NC)"
-	@cd docs && npm run start -- --port $(docs_port)
-
-docs_build: docs_install ## build documentation for production
-	@echo "$(GREEN)Building documentation...$(NC)"
-	@cd docs && npm run build
-	@echo "$(GREEN)Documentation built successfully in docs/build/$(NC)"
-
-docs_serve: docs_build ## build and serve documentation locally
-	@echo "$(GREEN)Serving built documentation...$(NC)"
-	@cd docs && npm run serve -- --port $(docs_port)
-
-# Comma-separated list; override e.g. suites=curl,javascript,python
-# Note: $(or $(suites),a,b,c) is wrong here — GNU make's `or` returns only the first non-empty token.
-suites ?= curl,python,javascript
-
-api_examples_local: ## run docs API sample files against a local Langflow server
-	@echo "$(GREEN)Running docs API examples locally...$(NC)"
-	@SUITES="$(suites)" EXECUTE_MODE=true ./scripts/test-api-examples-local.sh
-
-api_examples_local_syntax: ## syntax-check docs API sample files locally without execution
-	@echo "$(GREEN)Running docs API example syntax checks locally...$(NC)"
-	@SUITES="$(suites)" EXECUTE_MODE=false ./scripts/test-api-examples-local.sh
 
 ######################
 # INCLUDE FRONTEND MAKEFILE

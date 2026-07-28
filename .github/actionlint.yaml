@@ -1,4 +1,0 @@
-self-hosted-runner:
-  labels:
-    - langflow-ai-arm64-40gb-ephemeral
-    - Langflow-runner

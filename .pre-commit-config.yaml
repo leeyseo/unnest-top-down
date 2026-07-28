@@ -19,14 +19,12 @@ repos:
         language: system
         types_or: [python, pyi]
         args: [--fix]
-        exclude: ^docs/.*/API-Reference/python-examples/
       - id: ruff-format
         name: ruff format
         entry: uv run ruff format
         language: system
         types_or: [python, pyi]
         args: [--config, pyproject.toml]
-        exclude: ^docs/.*/API-Reference/python-examples/
       - id: validate-migrations
         name: Validate Alembic Migrations (Expand-Contract)
         entry: python src/backend/base/langflow/alembic/migration_validator.py
@@ -80,14 +78,13 @@ repos:
         language: system
         types: [text]
         files: "^src/frontend/.*\\.(jsx?|tsx?|c(js|ts)|m(js|ts)|d\\.(ts|cts|mts)|jsonc?)$"
-        exclude: (^docs/|src/lfx/src/lfx/_assets/component_index\.json$)
+        exclude: src/lfx/src/lfx/_assets/component_index\.json$
         pass_filenames: true
       - id: biome-lint-no-any-staged
         name: biome no-any check (staged only)
         entry: bash -c 'cd src/frontend && npx @biomejs/biome lint --staged --diagnostic-level=error --no-errors-on-unmatched'
         language: system
         files: "^src/frontend/.*\\.(tsx?|ts)$"
-        exclude: (^docs/)
         pass_filenames: false
       - id: validate-starter-projects
         name: Validate Starter Project Templates

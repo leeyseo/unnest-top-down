@@ -20,9 +20,6 @@ python3 scripts/generate_coverage_config.py
 cd src/backend && python -m pytest --cov=src/backend/base/langflow --cov-config=.coveragerc
 ```
 
-### CI Integration
-The script runs automatically in CI before backend tests via `.github/workflows/python_test.yml`.
-
 ## Files affected
 
 - **Input**: `src/frontend/src/utils/styleUtils.ts` (SIDEBAR_BUNDLES)
