@@ -1,0 +1,14 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
+    args:
+      - build
+      - --file
+      - docker/build_and_push.Dockerfile
+      - --tag
+      - ${_IMAGE}
+      - .
+images:
+  - ${_IMAGE}
+timeout: 3600s

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Profile Avatar Creator"
+  short_description: "Create and validate Unnest profile avatar packs"
+  default_prompt: "Use $profile-avatar-creator to create a consistent, transparent profile avatar pack and verify it in the Unnest UI."

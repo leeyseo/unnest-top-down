@@ -1,0 +1,18 @@
+{
+  "name": "Unnest",
+  "short_name": "Unnest",
+  "description": "AI workflow를 시각적으로 설계하고 실행하는 플랫폼",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any"
+    }
+  ],
+  "theme_color": "#000000",
+  "background_color": "#ffffff",
+  "categories": ["developer", "productivity", "utilities"],
+  "screenshots": [],
+  "related_applications": [],
+  "prefer_related_applications": false
+}

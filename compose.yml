@@ -1,0 +1,21 @@
+services:
+  unnest:
+    build:
+      context: .
+      dockerfile: docker/build_and_push.Dockerfile
+    image: unnestflow:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7860:7860"
+    environment:
+      DO_NOT_TRACK: "true"
+      LANGFLOW_AUTO_LOGIN: "false"
+      LANGFLOW_CONFIG_DIR: /app/langflow
+      LANGFLOW_CORS_ORIGINS: '["http://localhost:7860"]'
+      LANGFLOW_SUPERUSER: admin
+      LANGFLOW_SUPERUSER_PASSWORD: ${UNNEST_ADMIN_PASSWORD:?set UNNEST_ADMIN_PASSWORD}
+    volumes:
+      - unnest-data:/app/langflow
+
+volumes:
+  unnest-data:

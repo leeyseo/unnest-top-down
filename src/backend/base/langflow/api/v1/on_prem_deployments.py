@@ -1,0 +1,683 @@
+"""Create and inspect immutable on-premise deployment releases."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Annotated
+from uuid import UUID
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse, Response
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import col, select
+from starlette.background import BackgroundTask
+
+from langflow.api.utils import CurrentActiveUser, DbSession, DbSessionReadOnly
+from langflow.api.v1.schemas.on_prem_deployments import (
+    AcceptanceTestCreate,
+    CriticalOverrideRequest,
+    DeploymentArtifactRead,
+    DeploymentBuildListResponse,
+    DeploymentBuildRead,
+    OnPremReleaseCreateRequest,
+    OnPremReleaseListResponse,
+    OnPremReleaseRead,
+    OnPremReleaseValidationResponse,
+    RegistryPushRequest,
+)
+from langflow.services.auth.utils import get_current_active_superuser
+from langflow.services.database.models.auth import AuthzAuditLog
+from langflow.services.database.models.deployment_release import (
+    DeploymentAcceptanceTest,
+    DeploymentArtifact,
+    DeploymentBuild,
+    DeploymentRelease,
+    DeploymentReleaseFlowVersion,
+)
+from langflow.services.database.models.flow_version.crud import get_flow_version_entries_by_ids
+from langflow.services.deployment import (
+    BuildKitWorkerClient,
+    WorkerBuildStatus,
+    analyze_release,
+    sanitize_flow_for_build,
+)
+from langflow.services.deployment.source_documents import (
+    SourceDocumentError,
+    materialize_source_documents,
+    snapshot_source_documents,
+)
+from langflow.services.deps import get_storage_service
+from langflow.services.storage.service import StorageService
+
+router = APIRouter(
+    prefix="/deployments/on-prem/releases",
+    tags=["On-premise Deployments"],
+    dependencies=[Depends(get_current_active_superuser)],
+)
+MAX_OFFLINE_PACKAGE_SIZE = 50 * 1024**3
+
+
+def _to_read(release: DeploymentRelease, *, warnings: list[str] | None = None) -> OnPremReleaseRead:
+    return OnPremReleaseRead(
+        id=release.id,
+        release_version=release.version,
+        api_version=release.api_version,
+        agent_flow_version_id=release.agent_flow_version_id,
+        ingestion_flow_version_id=release.ingestion_flow_version_id,
+        subflow_version_ids=[UUID(value) for value in release.subflow_version_ids],
+        source_file_ids=[
+            UUID(str(entry["id"]))
+            for entry in release.manifest.get("source_documents", [])
+            if isinstance(entry, dict) and entry.get("id")
+        ],
+        config=release.config,
+        manifest=release.manifest,
+        warnings=warnings or [],
+    )
+
+
+async def _owned_release(
+    session: DbSession | DbSessionReadOnly,
+    *,
+    release_id: UUID,
+    user_id: UUID,
+) -> DeploymentRelease:
+    release = (
+        await session.exec(
+            select(DeploymentRelease).where(
+                DeploymentRelease.id == release_id,
+                DeploymentRelease.user_id == user_id,
+            )
+        )
+    ).first()
+    if release is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Release not found")
+    return release
+
+
+async def _owned_build(
+    session: DbSession | DbSessionReadOnly,
+    *,
+    release_id: UUID,
+    build_id: UUID,
+    user_id: UUID,
+) -> tuple[DeploymentRelease, DeploymentBuild]:
+    release = await _owned_release(session, release_id=release_id, user_id=user_id)
+    build = (
+        await session.exec(
+            select(DeploymentBuild).where(
+                DeploymentBuild.id == build_id,
+                DeploymentBuild.release_id == release.id,
+            )
+        )
+    ).first()
+    if build is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Build not found")
+    return release, build
+
+
+async def _owned_artifact(
+    session: DbSession | DbSessionReadOnly,
+    *,
+    release_id: UUID,
+    build_id: UUID,
+    artifact_id: UUID,
+    user_id: UUID,
+) -> tuple[DeploymentRelease, DeploymentBuild, DeploymentArtifact]:
+    release, build = await _owned_build(
+        session,
+        release_id=release_id,
+        build_id=build_id,
+        user_id=user_id,
+    )
+    artifact = await session.get(DeploymentArtifact, artifact_id)
+    if artifact is None or artifact.build_id != build.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Artifact not found")
+    return release, build, artifact
+
+
+async def _build_read(session: DbSession | DbSessionReadOnly, build: DeploymentBuild) -> DeploymentBuildRead:
+    artifacts = (await session.exec(select(DeploymentArtifact).where(DeploymentArtifact.build_id == build.id))).all()
+    return DeploymentBuildRead(
+        id=build.id,
+        release_id=build.release_id,
+        architecture=build.architecture,
+        status=build.status,
+        worker_job_id=build.worker_job_id,
+        logs=build.logs,
+        scan_report=build.scan_report,
+        critical_override_reason=build.critical_override_reason,
+        artifacts=[DeploymentArtifactRead.model_validate(artifact, from_attributes=True) for artifact in artifacts],
+    )
+
+
+def _worker_client_or_503() -> BuildKitWorkerClient:
+    try:
+        return BuildKitWorkerClient.from_env()
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+async def _apply_worker_status(
+    session: DbSession,
+    *,
+    release: DeploymentRelease,
+    build: DeploymentBuild,
+    worker: WorkerBuildStatus,
+) -> None:
+    if worker.job_id != str(build.id):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="BuildKit worker returned a mismatched build job id",
+        )
+    if worker.status == "succeeded" and (
+        len(worker.artifacts) != 1
+        or worker.artifacts[0].artifact_type != "package"
+        or worker.artifacts[0].size_bytes <= 0
+        or worker.artifacts[0].size_bytes > MAX_OFFLINE_PACKAGE_SIZE
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="BuildKit worker did not return exactly one non-empty package artifact",
+        )
+    if (
+        worker.status == "succeeded"
+        and release.manifest.get("build", {}).get("signing_enabled")
+        and any(not artifact.signature for artifact in worker.artifacts)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="BuildKit worker returned an unsigned artifact for a signed release",
+        )
+    build.worker_job_id = worker.job_id
+    build.status = worker.status
+    build.logs = worker.logs
+    build.scan_report = worker.scan_report
+    session.add(build)
+    if worker.status != "succeeded":
+        return
+    existing = (await session.exec(select(DeploymentArtifact).where(DeploymentArtifact.build_id == build.id))).all()
+    for artifact in existing:
+        await session.delete(artifact)
+    if existing:
+        await session.flush()
+    pinned = bool(release.config.get("retention", {}).get("pinned"))
+    retention_days = int(release.config.get("retention", {}).get("days", 30))
+    expires_at = None if pinned else datetime.now(timezone.utc) + timedelta(days=retention_days)
+    session.add_all(
+        [
+            DeploymentArtifact(
+                build_id=build.id,
+                artifact_type=artifact.artifact_type,
+                location=artifact.location,
+                digest=artifact.digest,
+                size_bytes=artifact.size_bytes,
+                checksums=artifact.checksums,
+                sbom=artifact.sbom,
+                signature=artifact.signature,
+                pinned=pinned,
+                expires_at=expires_at,
+            )
+            for artifact in worker.artifacts
+        ]
+    )
+
+
+async def _latest_manifest(session: DbSession | DbSessionReadOnly, user_id: UUID) -> dict | None:
+    latest = (
+        await session.exec(
+            select(DeploymentRelease)
+            .where(DeploymentRelease.user_id == user_id)
+            .order_by(col(DeploymentRelease.created_at).desc())
+        )
+    ).first()
+    return latest.manifest if latest else None
+
+
+async def _analyze(
+    session: DbSession | DbSessionReadOnly,
+    current_user: CurrentActiveUser,
+    payload: OnPremReleaseCreateRequest,
+    storage_service: StorageService,
+):
+    source_documents = await snapshot_source_documents(
+        session,
+        storage_service,
+        user_id=current_user.id,
+        file_ids=payload.source_file_ids,
+    )
+    return await analyze_release(
+        session,
+        user_id=current_user.id,
+        release_version=payload.release_version,
+        agent_flow_version_id=payload.agent_flow_version_id,
+        ingestion_flow_version_id=payload.ingestion_flow_version_id,
+        config=payload.config,
+        api=payload.api,
+        source_documents=list(source_documents.documents),
+        source_document_errors=list(source_documents.errors),
+        acceptance_tests=payload.acceptance_tests,
+        previous_manifest=await _latest_manifest(session, current_user.id),
+    )
+
+
+@router.post("/validate", response_model=OnPremReleaseValidationResponse)
+async def validate_release(
+    payload: OnPremReleaseCreateRequest,
+    session: DbSessionReadOnly,
+    current_user: CurrentActiveUser,
+    storage_service: Annotated[StorageService, Depends(get_storage_service)],
+) -> OnPremReleaseValidationResponse:
+    analysis = await _analyze(session, current_user, payload, storage_service)
+    return OnPremReleaseValidationResponse(
+        manifest=analysis.manifest,
+        errors=list(analysis.errors),
+        warnings=list(analysis.warnings),
+    )
+
+
+@router.post("", response_model=OnPremReleaseRead, status_code=status.HTTP_201_CREATED)
+async def create_release(
+    payload: OnPremReleaseCreateRequest,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+    storage_service: Annotated[StorageService, Depends(get_storage_service)],
+) -> OnPremReleaseRead:
+    existing = (
+        await session.exec(
+            select(DeploymentRelease).where(
+                DeploymentRelease.user_id == current_user.id,
+                DeploymentRelease.version == payload.release_version,
+            )
+        )
+    ).first()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Release version already exists")
+
+    analysis = await _analyze(session, current_user, payload, storage_service)
+    if analysis.errors or analysis.manifest is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"errors": list(analysis.errors), "warnings": list(analysis.warnings)},
+        )
+
+    release = DeploymentRelease(
+        user_id=current_user.id,
+        version=payload.release_version,
+        agent_flow_version_id=payload.agent_flow_version_id,
+        ingestion_flow_version_id=payload.ingestion_flow_version_id,
+        subflow_version_ids=[str(value) for value in analysis.subflow_version_ids],
+        config=payload.config.model_dump(mode="json"),
+        manifest=analysis.manifest,
+        api_version=analysis.manifest["api"]["version"],
+    )
+    session.add(release)
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Release version already exists") from exc
+
+    attached_versions = {
+        payload.agent_flow_version_id: "agent",
+        payload.ingestion_flow_version_id: "ingestion",
+        **dict.fromkeys(analysis.subflow_version_ids, "subflow"),
+    }
+    session.add_all(
+        [
+            DeploymentReleaseFlowVersion(
+                release_id=release.id,
+                flow_version_id=version_id,
+                role=role,
+            )
+            for version_id, role in attached_versions.items()
+        ]
+    )
+    session.add(
+        DeploymentBuild(
+            release_id=release.id,
+            architecture=payload.config.architecture,
+            status="pending",
+        )
+    )
+    tests = [AcceptanceTestCreate.model_validate(value) for value in release.manifest["acceptance_tests"]]
+    session.add_all(
+        [
+            DeploymentAcceptanceTest(
+                release_id=release.id,
+                name=test.name,
+                required=test.required,
+                request=test.request,
+                expected=test.expected,
+            )
+            for test in tests
+        ]
+    )
+    await session.flush()
+    return _to_read(release, warnings=list(analysis.warnings))
+
+
+@router.get("", response_model=OnPremReleaseListResponse)
+async def list_releases(
+    session: DbSessionReadOnly,
+    current_user: CurrentActiveUser,
+) -> OnPremReleaseListResponse:
+    releases = (
+        await session.exec(
+            select(DeploymentRelease)
+            .where(DeploymentRelease.user_id == current_user.id)
+            .order_by(col(DeploymentRelease.created_at).desc())
+            .limit(100)
+        )
+    ).all()
+    return OnPremReleaseListResponse(releases=[_to_read(release) for release in releases])
+
+
+@router.get("/{release_id}", response_model=OnPremReleaseRead)
+async def get_release(
+    release_id: UUID,
+    session: DbSessionReadOnly,
+    current_user: CurrentActiveUser,
+) -> OnPremReleaseRead:
+    release = await _owned_release(session, release_id=release_id, user_id=current_user.id)
+    return _to_read(release)
+
+
+@router.post("/{release_id}/builds/{build_id}/submit", response_model=DeploymentBuildRead)
+async def submit_build(
+    release_id: UUID,
+    build_id: UUID,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+    storage_service: Annotated[StorageService, Depends(get_storage_service)],
+) -> DeploymentBuildRead:
+    release, build = await _owned_build(
+        session,
+        release_id=release_id,
+        build_id=build_id,
+        user_id=current_user.id,
+    )
+    if build.status in {"queued", "running", "succeeded"}:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Build is already {build.status}")
+
+    version_ids = [
+        release.agent_flow_version_id,
+        release.ingestion_flow_version_id,
+        *(UUID(value) for value in release.subflow_version_ids),
+    ]
+    versions = await get_flow_version_entries_by_ids(session, version_ids, current_user.id)
+    if missing := [str(version_id) for version_id in version_ids if version_id not in versions]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Release Flow Versions are no longer available: {', '.join(missing)}",
+        )
+    payload = {
+        "release_id": str(release.id),
+        "build_id": str(build.id),
+        "manifest": release.manifest,
+        "flows": [
+            {
+                "version_id": str(version_id),
+                "data": sanitize_flow_for_build(versions[version_id].data or {}),
+            }
+            for version_id in version_ids
+        ],
+        "critical_override": (
+            {"reason": build.critical_override_reason, "user_id": str(build.overridden_by_user_id)}
+            if build.critical_override_reason
+            else None
+        ),
+        "reproducible": {"source_date_epoch": 0, "sort_files": True},
+    }
+    try:
+        with TemporaryDirectory(prefix="unnest-source-documents-") as temporary:
+            documents = await materialize_source_documents(
+                session,
+                storage_service,
+                user_id=release.user_id,
+                manifest=release.manifest,
+                destination=Path(temporary) / "documents",
+            )
+            async with _worker_client_or_503() as client:
+                worker = await client.submit(payload, documents)
+    except SourceDocumentError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except (httpx.HTTPError, OSError) as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="BuildKit worker request failed") from exc
+    await _apply_worker_status(session, release=release, build=build, worker=worker)
+    await session.flush()
+    return await _build_read(session, build)
+
+
+@router.get("/{release_id}/builds", response_model=DeploymentBuildListResponse)
+async def list_builds(
+    release_id: UUID,
+    session: DbSessionReadOnly,
+    current_user: CurrentActiveUser,
+) -> DeploymentBuildListResponse:
+    release = await _owned_release(session, release_id=release_id, user_id=current_user.id)
+    builds = (
+        await session.exec(
+            select(DeploymentBuild)
+            .where(DeploymentBuild.release_id == release.id)
+            .order_by(col(DeploymentBuild.created_at).desc())
+        )
+    ).all()
+    return DeploymentBuildListResponse(builds=[await _build_read(session, build) for build in builds])
+
+
+@router.get("/{release_id}/builds/{build_id}/artifacts/{artifact_id}/download")
+async def download_artifact(
+    release_id: UUID,
+    build_id: UUID,
+    artifact_id: UUID,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+) -> Response:
+    release, build, artifact = await _owned_artifact(
+        session,
+        release_id=release_id,
+        build_id=build_id,
+        artifact_id=artifact_id,
+        user_id=current_user.id,
+    )
+    if artifact.artifact_type != "package":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only package artifacts can be downloaded",
+        )
+    if not build.worker_job_id or build.status != "succeeded":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Build artifact is not ready")
+    temporary = TemporaryDirectory(prefix="unnest-download-")
+    destination = Path(temporary.name) / "release.tar"
+    try:
+        async with _worker_client_or_503() as client:
+            actual_digest, actual_size = await client.download_artifact(
+                build.worker_job_id,
+                artifact.artifact_type,
+                destination,
+                max_bytes=artifact.size_bytes,
+            )
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        temporary.cleanup()
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Artifact download failed") from exc
+    if actual_digest != artifact.digest or actual_size != artifact.size_bytes:
+        temporary.cleanup()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Downloaded artifact failed integrity verification",
+        )
+    session.add(
+        AuthzAuditLog(
+            user_id=current_user.id,
+            action="deployment:artifact_download",
+            resource_type="deployment_artifact",
+            resource_id=artifact.id,
+            result="allow",
+            details={"release_id": str(release.id), "digest": artifact.digest},
+        )
+    )
+    await session.flush()
+    filename = f"unnest-{release.version}-{build.architecture}.tar"
+    return FileResponse(
+        destination,
+        filename=filename,
+        media_type="application/x-tar",
+        headers={
+            "X-Checksum-SHA256": artifact.digest.removeprefix("sha256:"),
+        },
+        background=BackgroundTask(temporary.cleanup),
+    )
+
+
+@router.post(
+    "/{release_id}/builds/{build_id}/registry",
+    response_model=DeploymentArtifactRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def push_build_to_registry(
+    release_id: UUID,
+    build_id: UUID,
+    payload: RegistryPushRequest,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+) -> DeploymentArtifactRead:
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin access required")
+    release, build = await _owned_build(
+        session,
+        release_id=release_id,
+        build_id=build_id,
+        user_id=current_user.id,
+    )
+    if build.status != "succeeded" or not build.worker_job_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Build is not ready for registry push")
+    try:
+        async with _worker_client_or_503() as client:
+            pushed = await client.push_registry(
+                build.worker_job_id,
+                reference=payload.reference,
+                credential_secret_name=payload.credential_secret_name,
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Registry push failed") from exc
+    if pushed.artifact_type != "registry" or pushed.location != payload.reference:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="BuildKit worker returned an invalid registry artifact",
+        )
+    if release.manifest.get("build", {}).get("signing_enabled") and not pushed.signature:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="BuildKit worker returned an unsigned registry artifact",
+        )
+    existing = (
+        await session.exec(
+            select(DeploymentArtifact).where(
+                DeploymentArtifact.build_id == build.id,
+                DeploymentArtifact.artifact_type == "registry",
+            )
+        )
+    ).first()
+    if existing is not None:
+        await session.delete(existing)
+        await session.flush()
+    pinned = bool(release.config.get("retention", {}).get("pinned"))
+    artifact = DeploymentArtifact(
+        build_id=build.id,
+        artifact_type=pushed.artifact_type,
+        location=pushed.location,
+        digest=pushed.digest,
+        size_bytes=pushed.size_bytes,
+        checksums=pushed.checksums,
+        sbom=pushed.sbom,
+        signature=pushed.signature,
+        pinned=pinned,
+        expires_at=(
+            None
+            if pinned
+            else datetime.now(timezone.utc) + timedelta(days=int(release.config.get("retention", {}).get("days", 30)))
+        ),
+    )
+    session.add(artifact)
+    await session.flush()
+    session.add(
+        AuthzAuditLog(
+            user_id=current_user.id,
+            action="deployment:registry_push",
+            resource_type="deployment_artifact",
+            resource_id=artifact.id,
+            result="allow",
+            details={
+                "release_id": str(release.id),
+                "reference": payload.reference,
+                "digest": artifact.digest,
+                "credential_secret_name": payload.credential_secret_name,
+            },
+        )
+    )
+    await session.flush()
+    return DeploymentArtifactRead.model_validate(artifact, from_attributes=True)
+
+
+@router.post("/{release_id}/builds/{build_id}/sync", response_model=DeploymentBuildRead)
+async def sync_build(
+    release_id: UUID,
+    build_id: UUID,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+) -> DeploymentBuildRead:
+    release, build = await _owned_build(
+        session,
+        release_id=release_id,
+        build_id=build_id,
+        user_id=current_user.id,
+    )
+    if not build.worker_job_id:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Build has not been submitted")
+    try:
+        async with _worker_client_or_503() as client:
+            worker = await client.get(build.worker_job_id)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="BuildKit worker request failed") from exc
+    await _apply_worker_status(session, release=release, build=build, worker=worker)
+    await session.flush()
+    return await _build_read(session, build)
+
+
+@router.patch("/{release_id}/builds/{build_id}/critical-override", response_model=DeploymentBuildRead)
+async def override_critical_build_block(
+    release_id: UUID,
+    build_id: UUID,
+    payload: CriticalOverrideRequest,
+    session: DbSession,
+    current_user: CurrentActiveUser,
+) -> DeploymentBuildRead:
+    _release, build = await _owned_build(
+        session,
+        release_id=release_id,
+        build_id=build_id,
+        user_id=current_user.id,
+    )
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Superadmin access required")
+    if build.status != "blocked":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only a blocked build can be overridden")
+    build.critical_override_reason = payload.reason
+    build.overridden_by_user_id = current_user.id
+    build.status = "pending"
+    session.add(build)
+    session.add(
+        AuthzAuditLog(
+            user_id=current_user.id,
+            action="deployment:critical_override",
+            resource_type="deployment_build",
+            resource_id=build.id,
+            result="allow",
+            details={"reason": payload.reason, "release_id": str(release_id)},
+        )
+    )
+    await session.flush()
+    return await _build_read(session, build)
